@@ -77,27 +77,24 @@ src/openjarvis/agents/hybrid/scripts/new_experiment.sh \
 That appends a `[cells.<name>]` block to
 `registry/conductor.toml` and prints the runner invocation.
 
-## Reproducing the hybrid harness numbers
+## How good is each paradigm?
 
-The cell configs in `registry/` are copies of the hybrid harness's
-`experiments/registry/` — same models, same N, same `method_cfg`. The
-agent code is a faithful port of each adapter (same prompts, same JSON
-schemas, same patches), so running these cells in OpenJarvis should
-reproduce the numbers in
-`/matx/u/aspark/hybrid-local-cloud-compute/docs/results.md`:
+Numbers from the upstream hybrid harness
+(`/matx/u/aspark/hybrid-local-cloud-compute/docs/results.md`) at full N —
+GAIA val n=165, SWE-bench-Verified n=500. Local = Qwen-3.5-27B-FP8, cloud
+= Opus 4.7. Cloud-only baseline: GAIA 0.570 / $1.09, SWE 0.238 / $0.95.
 
-| paradigm        | bench    | N   | acc    | $/task |
-|-----------------|----------|-----|--------|--------|
-| minions         | swebench | 500 | 0.274  | $0.09  |
-| minions         | gaia     | 165 | 0.576  | $0.67  |
-| conductor       | swebench | 30  | 0.367  | $0.22  |
-| skillorchestra  | gaia     | 30  | 0.500  | $0.02  |
-| advisors        | gaia     | 30  | 0.533  | $0.02  |
+| paradigm           | shape                | GAIA acc / $    | SWE acc / $     | verdict                                          |
+|--------------------|----------------------|-----------------|-----------------|--------------------------------------------------|
+| **minions**        | reactive 1L+1C loop  | 0.576 / $0.67   | 0.276 / $0.09   | **keep** — matches cloud, ~10× cheaper on SWE    |
+| **skillorchestra** | per-query router     | 0.570 / $0.02   | 0.298 / $0.05   | **keep** — cloud-tier acc at 1/50× cost          |
+| conductor          | static DAG planner   | 0.503 / $0.03   | 0.296 / $0.07   | mixed — wins SWE, −7pp on GAIA                   |
+| advisors           | exec ↔ advisor loop  | 0.497 / $0.02   | 0.302 / $0.07   | mixed — wins SWE, −7pp on GAIA                   |
+| archon             | gen → rank → fuse    | 0.376 / $0.14   | 0.288 / $0.17   | dominated on GAIA (−19pp); only mid on SWE       |
+| toolorchestra      | RL'd 8B + tool pool  | —               | —               | port lands but untested at full N (heavy infra)  |
 
-Baselines for comparison:
-- `baseline-cloud-gaia-opus` = 0.570 / $1.09 per task
-- `baseline-cloud-swebench-opus` = 0.236 / $0.95 per task
-
-The hybrid harness stays the authoritative reference for n=500 numbers
-while we validate the port. Once OpenJarvis cells reproduce the headline
-accuracies within noise, the harness can be deprecated in favor of these.
+Cell configs in `registry/` are copies of the hybrid harness's
+`experiments/registry/` — same models, same N, same `method_cfg` — so
+these OpenJarvis cells should reproduce the harness numbers within
+noise. Until that's validated, the harness stays the authoritative
+reference.
