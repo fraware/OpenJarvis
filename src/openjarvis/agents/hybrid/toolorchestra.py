@@ -41,17 +41,16 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
-
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from openjarvis.agents._stubs import AgentContext
 from openjarvis.agents.hybrid._base import (
     ANTHROPIC_WEB_SEARCH_TOOL,
-    LocalCloudAgent,
     WEB_SEARCH_COST_PER_CALL,
+    LocalCloudAgent,
 )
 from openjarvis.agents.hybrid._prices import (
     is_gpt5_family,
@@ -63,7 +62,6 @@ from openjarvis.agents.hybrid.mini_swe_agent import (
     run_swe_agent_loop,
 )
 from openjarvis.core.registry import AgentRegistry
-
 
 ORCHESTRATOR_SYS = """\
 You are a tool-orchestrating agent. You coordinate a pool of workers to answer the user's question. Each turn you MUST emit exactly one JSON object — no prose, no markdown fences — taking one of two forms:

@@ -34,10 +34,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openjarvis.agents._stubs import AgentContext
 from openjarvis.agents.hybrid._base import LocalCloudAgent
-from openjarvis.agents.hybrid._prices import NO_TEMP_PREFIXES, supports_temperature
+from openjarvis.agents.hybrid._prices import supports_temperature
 from openjarvis.agents.hybrid.mini_swe_agent import run_swe_agent_loop
 from openjarvis.core.registry import AgentRegistry
-
 
 # ---------- Skill catalog (compact, GAIA-relevant) ----------
 #

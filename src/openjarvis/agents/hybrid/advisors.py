@@ -27,19 +27,12 @@ import json
 import urllib.request
 from typing import Any, Dict, Optional, Tuple
 
-import shutil
-import tempfile
-from pathlib import Path
-
 from openjarvis.agents._stubs import AgentContext
 from openjarvis.agents.hybrid._base import LocalCloudAgent
 from openjarvis.agents.hybrid.mini_swe_agent import (
-    _clone_repo,
-    _extract_diff,
     run_swe_agent_loop,
 )
 from openjarvis.core.registry import AgentRegistry
-
 
 # Prompts paraphrased from advisor-models/{math,template}/config.py.
 

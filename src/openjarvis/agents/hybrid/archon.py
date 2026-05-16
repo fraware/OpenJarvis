@@ -39,18 +39,18 @@ import os
 import sys
 import threading
 import types
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from openjarvis.agents._stubs import AgentContext
 from openjarvis.agents.hybrid._base import LocalCloudAgent, _record_event
 from openjarvis.agents.hybrid._prices import (
     NO_TEMP_PREFIXES,
+)
+from openjarvis.agents.hybrid._prices import (
     cost as _cost_cloud,
-    supports_temperature,
 )
 from openjarvis.agents.hybrid.mini_swe_agent import run_swe_agent_loop
 from openjarvis.core.registry import AgentRegistry
-
 
 ARCHON_SWE_RANKER_SYS = (
     "You are ranking K candidate patches for a SWE-bench bug. For each "
@@ -92,7 +92,6 @@ def _add_archon_to_path() -> None:
 # ---------- Anthropic patch for Opus 4.7 ----------
 
 def _patch_anthropic_for_opus() -> None:
-    import anthropic
     from anthropic.resources.messages import messages as _msgs_mod
 
     cls = _msgs_mod.Messages
@@ -189,8 +188,8 @@ def _wrap_archon_cloud_generators() -> None:
     """Replace Archon's GENERATE_MAP entries for OpenAI_API / Anthropic_API
     with token-tallying wrappers. GENERATE_MAP holds function references;
     we update them in place so Ranker/Fuser see the wrapped versions."""
-    from openai import OpenAI as _OAI
     import anthropic as _anth
+    from openai import OpenAI as _OAI
 
     def gen_openai(model, messages, max_tokens=2048, temperature=0.7, **_kw):  # type: ignore[no-untyped-def]
         import time as _time
@@ -258,7 +257,9 @@ def _wrap_archon_cloud_generators() -> None:
         })
         return text.strip()
 
-    from archon.completions.components.Generator import GENERATE_MAP as _GMAP  # type: ignore[import-not-found]
+    from archon.completions.components.Generator import (
+        GENERATE_MAP as _GMAP,  # type: ignore[import-not-found]
+    )
     _GMAP["OpenAI_API"] = gen_openai
     _GMAP["Anthropic_API"] = gen_anthropic
 
@@ -285,7 +286,9 @@ def _patch_archon_prompts() -> None:
     no reminder of the format the user originally asked for, so on SWE-bench
     Opus drifts to a markdown bug report and scores 0. We append an explicit
     format-honor reminder to the fuser prompt."""
-    from archon.completions.components import prompts as _p  # type: ignore[import-not-found]
+    from archon.completions.components import (
+        prompts as _p,  # type: ignore[import-not-found]
+    )
 
     if getattr(_p.make_fuser_prompt, "_hybrid_format_patched", False):
         return
@@ -298,7 +301,9 @@ def _patch_archon_prompts() -> None:
     patched._hybrid_format_patched = True  # type: ignore[attr-defined]
     _p.make_fuser_prompt = patched
     # Fuser imports the symbol by name at class-body time — rebind there too.
-    from archon.completions.components import Fuser as _F  # type: ignore[import-not-found]
+    from archon.completions.components import (
+        Fuser as _F,  # type: ignore[import-not-found]
+    )
     _F.make_fuser_prompt = patched
 
 
@@ -392,7 +397,9 @@ class ArchonAgent(LocalCloudAgent):
 
         _apply_patches_once()
         from archon.completions import Archon  # type: ignore[import-not-found]
-        from archon.completions.components.Generator import GENERATE_MAP as _GMAP  # type: ignore[import-not-found]
+        from archon.completions.components.Generator import (
+            GENERATE_MAP as _GMAP,  # type: ignore[import-not-found]
+        )
 
         arch = cfg.get("architecture", "ensemble_rank_fuse")
         presets = _presets()

@@ -46,13 +46,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from openjarvis.agents._stubs import AgentContext
 from openjarvis.agents.hybrid._base import (
     ANTHROPIC_WEB_SEARCH_TOOL,
-    LocalCloudAgent,
     WEB_SEARCH_COST_PER_CALL,
+    LocalCloudAgent,
 )
-from openjarvis.agents.hybrid._prices import NO_TEMP_PREFIXES, supports_temperature
+from openjarvis.agents.hybrid._prices import NO_TEMP_PREFIXES
 from openjarvis.agents.hybrid.mini_swe_agent import run_swe_agent_loop
 from openjarvis.core.registry import AgentRegistry
-
 
 MINIONS_SWE_PLANNER_SYS = (
     "You are the cloud supervisor in a Minions setup. The small local model "
@@ -177,8 +176,8 @@ def _stub_missing_imports() -> None:
 
 def _patch_anthropic_globally() -> None:
     import anthropic as _anth_mod
-    from anthropic.resources.messages import messages as _msgs_mod
     from anthropic.resources.beta.messages import messages as _beta_msgs_mod
+    from anthropic.resources.messages import messages as _msgs_mod
 
     # External Minions builds bare anthropic.Anthropic() clients (no timeout
     # / max_retries). Under concurrency=8 SWE-bench load those default to
@@ -360,8 +359,12 @@ class MinionsAgent(LocalCloudAgent):
             return self._run_swe(input, task_meta, cfg)
 
         _apply_patches_once()
-        from minions.clients.openai import OpenAIClient  # type: ignore[import-not-found]
-        from minions.clients.anthropic import AnthropicClient  # type: ignore[import-not-found]
+        from minions.clients.anthropic import (
+            AnthropicClient,  # type: ignore[import-not-found]
+        )
+        from minions.clients.openai import (
+            OpenAIClient,  # type: ignore[import-not-found]
+        )
         from minions.minion import Minion  # type: ignore[import-not-found]
         from minions.minions import Minions  # type: ignore[import-not-found]
 

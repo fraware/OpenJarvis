@@ -63,7 +63,9 @@ def _patch_modal_cgroup_v2() -> None:
     ``set_cpu_quota`` function body (if present) with a try/except wrapper.
     """
     try:
-        from swebench.harness.modal_eval import run_evaluation_modal as _m  # type: ignore[import-not-found]
+        from swebench.harness.modal_eval import (
+            run_evaluation_modal as _m,  # type: ignore[import-not-found]
+        )
     except Exception:
         return
     if getattr(_m, "_hybrid_cgroup_patched", False):

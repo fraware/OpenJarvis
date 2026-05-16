@@ -28,7 +28,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 try:
     import tomllib  # py3.11+
@@ -37,7 +37,6 @@ except ModuleNotFoundError:
 
 from openjarvis.agents._stubs import AgentContext, AgentResult
 from openjarvis.agents.hybrid._prompts import format_prompt as _format_prompt
-
 
 PACKAGE_DIR = Path(__file__).parent
 DEFAULT_REGISTRY_DIR = PACKAGE_DIR / "registry"
@@ -155,11 +154,11 @@ def _score_gaia(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
 
 def _score_swebench(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
     """Modal-backed SWE-bench Verified harness scorer."""
+    from openjarvis.evals.core.types import EvalRecord
     from openjarvis.evals.scorers.swebench_harness import (
         SWEBenchHarnessScorer,
         extract_patch,
     )
-    from openjarvis.evals.core.types import EvalRecord
 
     patch = extract_patch(answer)
     if patch is None:
@@ -213,7 +212,10 @@ def _cell_lock(out_dir: Path, cell_name: str):
             f"[lock] another runner is already running cell {cell_name!r} "
             f"(holder pid: {prev}). refusing to start a second instance."
         )
-    f.seek(0); f.truncate(); f.write(str(os.getpid())); f.flush()
+    f.seek(0)
+    f.truncate()
+    f.write(str(os.getpid()))
+    f.flush()
     try:
         yield
     finally:
@@ -313,9 +315,9 @@ def _write_summary(
 ) -> None:
     results_path = out_dir / "results.jsonl"
     rows = [
-        json.loads(l)
-        for l in results_path.read_text().splitlines()
-        if l.strip()
+        json.loads(line)
+        for line in results_path.read_text().splitlines()
+        if line.strip()
     ]
     n_done = len(rows)
     n_err = sum(1 for r in rows if r.get("error"))

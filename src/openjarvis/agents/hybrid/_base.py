@@ -46,12 +46,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from openjarvis.agents._stubs import AgentContext, AgentResult, BaseAgent
 from openjarvis.agents.hybrid._prices import (
     NO_TEMP_PREFIXES,
-    cost as estimate_cost,
     is_gpt5_family,
     supports_temperature,
 )
+from openjarvis.agents.hybrid._prices import (
+    cost as estimate_cost,
+)
 from openjarvis.engine._stubs import InferenceEngine
-
 
 # Anthropic server-side web_search: $10 per 1000 searches.
 WEB_SEARCH_COST_PER_CALL = 0.01

@@ -46,11 +46,11 @@ from openjarvis.agents._stubs import AgentContext
 from openjarvis.agents.hybrid._base import LocalCloudAgent, _record_event
 from openjarvis.agents.hybrid._prices import (
     cost as estimate_cost,
-    is_gpt5_family,
+)
+from openjarvis.agents.hybrid._prices import (
     supports_temperature,
 )
 from openjarvis.core.registry import AgentRegistry
-
 
 SYSTEM_PROMPT = """\
 You are an expert software engineer fixing a bug in a Python repository. \
@@ -274,7 +274,7 @@ def run_swe_agent_loop(
             raise
 
     _record_event({
-        f"kind": f"{trace_prefix}_setup",
+        "kind": f"{trace_prefix}_setup",
         "repo": repo,
         "base_commit": base_commit,
         "workdir": str(workdir),

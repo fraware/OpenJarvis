@@ -32,12 +32,11 @@ from __future__ import annotations
 import ast
 import json
 import re
-import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
-
 import shutil
 import tempfile
+import urllib.request
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from openjarvis.agents._stubs import AgentContext
 from openjarvis.agents.hybrid._base import LocalCloudAgent
@@ -51,7 +50,6 @@ from openjarvis.agents.hybrid.mini_swe_agent import (
     run_swe_agent_loop,
 )
 from openjarvis.core.registry import AgentRegistry
-
 
 CONDUCTOR_SYS = """\
 Your role as an assistant involves obtaining answers to questions by an iterative \
