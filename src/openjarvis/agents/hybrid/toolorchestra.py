@@ -53,6 +53,7 @@ from openjarvis.agents.hybrid._base import (
     LocalCloudAgent,
 )
 from openjarvis.agents.hybrid._prices import (
+    PRICES,
     is_gpt5_family,
     supports_temperature,
 )
@@ -460,8 +461,18 @@ class ToolOrchestraAgent(LocalCloudAgent):
                 parse_failures += 1
 
             if final_answer is None:
-                # Hard fallback: call the strongest worker (last) directly.
-                worker = workers[-1]
+                # Hard fallback: call the strongest non-search worker directly.
+                # "Strongest" = highest output-token price in `_prices.PRICES`,
+                # which tracks model capability tier closely enough for this.
+                # Search workers are excluded — they answer fact-lookup
+                # questions, not synthesis.
+                non_search = [
+                    w for w in workers if w.get("type") != "anthropic-web-search"
+                ] or workers
+                worker = max(
+                    non_search,
+                    key=lambda w: PRICES.get(w.get("model", ""), (0.0, 0.0))[1],
+                )
                 if swe_mode and shared_workdir is not None:
                     ans, w_in, w_out, is_local, extra_cost, _ = _swe_call_worker(
                         worker, question, cfg, task_meta,
