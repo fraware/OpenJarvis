@@ -304,10 +304,12 @@ def _swe_worker_step(
         backbone, model, endpoint, is_local = (
             "local", worker["model"], worker.get("base_url"), True,
         )
+        cloud_endpoint = "anthropic"  # unused on the local path
     elif ep == "anthropic":
         backbone, model, endpoint, is_local = (
             "cloud", worker["model"], None, False,
         )
+        cloud_endpoint = "anthropic"
     else:
         # OpenAI workers (gpt-5-mini etc.) aren't supported as agent-loop
         # backbones today (the loop's tool-call format is Anthropic- or
@@ -318,7 +320,7 @@ def _swe_worker_step(
         task,
         backbone=backbone,
         backbone_model=model,
-        cloud_endpoint="anthropic" if backbone == "cloud" else "anthropic",
+        cloud_endpoint=cloud_endpoint,
         local_endpoint=endpoint,
         initial_prompt=prompt,
         max_turns=int(cfg.get("swe_max_turns", 30)),
