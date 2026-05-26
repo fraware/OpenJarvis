@@ -36,6 +36,7 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 from openjarvis.evals.scorers.swebench_harness import _run_harness  # noqa: E402
 
 HYBRID_DIR = Path(os.path.expanduser("~/.openjarvis/experiments/hybrid"))
+RUNS_DIR = HYBRID_DIR / "runs"
 DOCS_TABLE = HYBRID_DIR / "docs" / "results-table.md"
 
 MAX_WORKERS = 8
@@ -190,7 +191,14 @@ def _process_cell(cell_dir: Path) -> Dict[str, Any]:
                 n_done += 1
             else:
                 with rows_lock:
-                    rows[i]["score"] = new_score
+                    old_score = rows[i].get("score") or {}
+                    old_ok = bool(isinstance(old_score, dict) and old_score.get("success"))
+                    new_reason = ((new_score.get("details") or {}).get("reason")
+                                  if isinstance(new_score.get("details"), dict) else None)
+                    if old_ok and not new_score["success"] and new_reason == "no_report":
+                        pass
+                    else:
+                        rows[i]["score"] = new_score
                 _flush_tracker(tid)
                 if new_score["success"]:
                     n_new_resolved += 1
@@ -295,7 +303,7 @@ def _update_results_table(summaries: List[Dict[str, Any]]) -> bool:
 
 def _resolve_cells(args: argparse.Namespace) -> List[Path]:
     if args.all_swe:
-        cells = sorted(p for p in HYBRID_DIR.glob("*-swe-n100") if p.is_dir())
+        cells = sorted(p for p in RUNS_DIR.glob("*-swe-n100") if p.is_dir())
         return [c for c in cells if (c / "results.jsonl").exists()]
     if not args.cells:
         raise SystemExit("Provide --cells or --all-swe")
@@ -304,7 +312,7 @@ def _resolve_cells(args: argparse.Namespace) -> List[Path]:
         name = name.strip()
         if not name:
             continue
-        p = HYBRID_DIR / name
+        p = RUNS_DIR / name
         if not p.exists():
             print(f"[WARN] cell not found: {p}")
             continue
@@ -315,7 +323,7 @@ def _resolve_cells(args: argparse.Namespace) -> List[Path]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cells", type=str, default="",
-                    help="Comma-separated cell names under ~/.openjarvis/experiments/hybrid/")
+                    help="Comma-separated cell names under ~/.openjarvis/experiments/hybrid/runs/")
     ap.add_argument("--all-swe", action="store_true",
                     help="Auto-detect cells matching *-swe-n100")
     args = ap.parse_args()
