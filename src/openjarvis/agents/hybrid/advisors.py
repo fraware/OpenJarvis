@@ -29,6 +29,8 @@ from typing import Any, Dict, Optional, Tuple
 
 from openjarvis.agents._stubs import AgentContext
 from openjarvis.agents.hybrid._base import (
+    GEMINI_SEARCH_COST_PER_CALL,
+    OPENAI_WEB_SEARCH_COST_PER_CALL,
     WEB_SEARCH_COST_PER_CALL,
     LocalCloudAgent,
     build_web_search_tool,
@@ -89,6 +91,21 @@ def _resolve_local_model(endpoint: str, registry_model: str) -> str:
     return served[0] if served else registry_model
 
 
+# Cloud endpoints that have a server-side web-search agent loop wired in
+# `_base.py`. Anything else (openrouter, vllm, unknown) cannot ground.
+_SEARCH_CAPABLE_ENDPOINTS = ("anthropic", "openai", "gemini")
+
+
+def _search_cost_per_call(endpoint: str) -> float:
+    """Per-search-call USD cost for the configured cloud endpoint."""
+    if endpoint == "openai":
+        return OPENAI_WEB_SEARCH_COST_PER_CALL
+    if endpoint == "gemini":
+        return GEMINI_SEARCH_COST_PER_CALL
+    # anthropic (and any caller that already validated the endpoint).
+    return WEB_SEARCH_COST_PER_CALL
+
+
 @AgentRegistry.register("advisors")
 class AdvisorsAgent(LocalCloudAgent):
     """Three-step executor ↔ advisor ↔ executor loop. See module docstring."""
@@ -118,21 +135,27 @@ class AdvisorsAgent(LocalCloudAgent):
         advisor_temperature = float(cfg.get("advisor_temperature", 0.2))
 
         ws_enabled, ws_max_uses = web_search_cfg(cfg)
-        use_ws = ws_enabled and self._cloud_endpoint == "anthropic"
+        if ws_enabled and self._cloud_endpoint not in _SEARCH_CAPABLE_ENDPOINTS:
+            raise ValueError(
+                f"web_search.enabled=true but cloud_endpoint={self._cloud_endpoint!r}; "
+                "server-side web_search is wired for anthropic / openai / gemini "
+                "executors only. Route this cell through one of those or disable "
+                "web_search — otherwise search would silently no-op and the "
+                "executor answers blind."
+            )
+        use_ws = ws_enabled
         gaia_max_turns = int(cfg.get("gaia_max_turns", 8))
-        ws_tool = [build_web_search_tool(ws_max_uses)] if use_ws else None
         n_searches_total = 0
 
         # 1. Initial executor pass — advisor (Qwen) doesn't get tools;
-        # only the cloud executor passes do.
+        # only the cloud executor passes do. With web_search on, dispatch
+        # to the search-capable agent loop for the configured provider.
         if use_ws:
-            initial_resp, e1_in, e1_out, n_s1, _ = self._call_anthropic_agent(
-                self._cloud_model,
+            initial_resp, e1_in, e1_out, n_s1, e1_turns = self._executor_search(
                 user=f"Question:\n{question}",
                 system=EXECUTOR_INITIAL_SYS,
                 max_tokens=executor_max_tokens,
-                temperature=0.0,
-                tools=ws_tool,
+                ws_max_uses=ws_max_uses,
                 max_turns=gaia_max_turns,
             )
             n_searches_total += n_s1
@@ -143,6 +166,7 @@ class AdvisorsAgent(LocalCloudAgent):
                 max_tokens=executor_max_tokens,
                 temperature=0.0,
             )
+            e1_turns = 1
 
         # 2. Advisor pass (local)
         if not self._local_endpoint or not self._local_model:
@@ -172,13 +196,11 @@ class AdvisorsAgent(LocalCloudAgent):
             f"answer-format rules."
         )
         if use_ws:
-            final_answer, e2_in, e2_out, n_s2, _ = self._call_anthropic_agent(
-                self._cloud_model,
+            final_answer, e2_in, e2_out, n_s2, e2_turns = self._executor_search(
                 user=final_user,
                 system=EXECUTOR_FINAL_SYS,
                 max_tokens=executor_max_tokens,
-                temperature=0.0,
-                tools=ws_tool,
+                ws_max_uses=ws_max_uses,
                 max_turns=gaia_max_turns,
             )
             n_searches_total += n_s2
@@ -189,17 +211,21 @@ class AdvisorsAgent(LocalCloudAgent):
                 max_tokens=executor_max_tokens,
                 temperature=0.0,
             )
+            e2_turns = 1
 
         tokens_local = adv_in + adv_out
         tokens_cloud = e1_in + e1_out + e2_in + e2_out
         cost = self.cost_usd(self._cloud_model, e1_in + e2_in, e1_out + e2_out)
-        cost += n_searches_total * WEB_SEARCH_COST_PER_CALL
+        cost += n_searches_total * _search_cost_per_call(self._cloud_endpoint)
 
         meta: Dict[str, Any] = {
             "tokens_local": tokens_local,
             "tokens_cloud": tokens_cloud,
             "cost_usd": cost,
-            "turns": 3,
+            # executor pass 1 + advisor pass (1) + executor pass 2. With
+            # web_search on, each executor pass is a multi-turn loop, so
+            # this is > 3; one-shot (no search) it's exactly 3.
+            "turns": e1_turns + 1 + e2_turns,
             "web_search_uses": n_searches_total,
             # GAIA: only the executor passes invoke a tool (web_search).
             "tool_calls": int(n_searches_total),
@@ -212,6 +238,61 @@ class AdvisorsAgent(LocalCloudAgent):
             },
         }
         return final_answer, meta
+
+    # ------------------------------------------------------------------
+    # Web-search executor dispatch
+    # ------------------------------------------------------------------
+
+    def _executor_search(
+        self,
+        *,
+        user: str,
+        system: str,
+        max_tokens: int,
+        ws_max_uses: int,
+        max_turns: int,
+    ) -> Tuple[str, int, int, int, int]:
+        """Run a search-capable executor pass for the configured cloud.
+
+        Dispatches by ``self._cloud_endpoint`` to the matching ``_base``
+        agent loop. Returns the shared 5-tuple ``(text, p_tok, c_tok,
+        n_searches, turns)``. The endpoint is assumed already validated
+        against ``_SEARCH_CAPABLE_ENDPOINTS`` by the caller.
+        """
+        if self._cloud_endpoint == "anthropic":
+            return self._call_anthropic_agent(
+                self._cloud_model,
+                user=user,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=0.0,
+                tools=[build_web_search_tool(ws_max_uses)],
+                max_turns=max_turns,
+            )
+        if self._cloud_endpoint == "openai":
+            return self._call_openai_agent(
+                self._cloud_model,
+                user=user,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=0.0,
+                max_turns=max_turns,
+            )
+        if self._cloud_endpoint == "gemini":
+            return self._call_gemini_agent(
+                self._cloud_model,
+                user=user,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=0.0,
+                max_turns=max_turns,
+            )
+        # Genuinely unsupported (openrouter / vllm / unknown). The caller
+        # guard should have caught this; raise defensively.
+        raise ValueError(
+            f"web_search executor pass requested but cloud_endpoint="
+            f"{self._cloud_endpoint!r} has no search wiring."
+        )
 
     # ------------------------------------------------------------------
     # SWE-bench variant: each executor pass is a full mini-SWE-agent run.

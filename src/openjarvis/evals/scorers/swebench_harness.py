@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,71 @@ from openjarvis.evals.core.scorer import Scorer
 from openjarvis.evals.core.types import EvalRecord
 
 logger = logging.getLogger(__name__)
+
+
+def _run_subprocess_hard_timeout(
+    cmd: list,
+    *,
+    timeout_s: int,
+    cwd: str,
+) -> "subprocess.CompletedProcess":
+    """Run ``cmd`` with a timeout that is actually enforced.
+
+    ``subprocess.run(..., capture_output=True, timeout=...)`` has a
+    well-known deadlock: on timeout it kills only the *direct* child, then
+    calls ``communicate()`` again to drain the pipes — but if that child
+    spawned grandchildren that inherited the stdout/stderr fds (the Modal
+    ``swebench`` harness does exactly this), those grandchildren keep the
+    pipe open and the drain blocks **forever**. The nominal timeout never
+    fires; the runner freezes.
+
+    This helper avoids that by:
+
+    1. Launching the child in its own process group (``start_new_session``)
+       so we can signal the whole tree, not just the direct child.
+    2. On timeout, ``SIGTERM`` then ``SIGKILL`` the entire group so no
+       grandchild survives to hold a pipe open.
+    3. Draining output with a *bounded* ``communicate()`` after the kill so
+       even a stubborn drain can't hang us.
+
+    Raises :class:`subprocess.TimeoutExpired` (same contract as
+    ``subprocess.run``) so callers can keep their existing except clause.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,  # own process group → killable as a tree
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+        return subprocess.CompletedProcess(
+            cmd, proc.returncode, stdout, stderr
+        )
+    except subprocess.TimeoutExpired:
+        # Kill the whole group, not just the direct child — Modal harness
+        # subprocesses fork workers that would otherwise keep pipes open.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(proc.pid, sig)
+            except (ProcessLookupError, PermissionError):
+                break
+            try:
+                proc.wait(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        # Drain whatever is left, but never block on it again — the group
+        # is dead, so this returns promptly; the short cap is just paranoia.
+        try:
+            stdout, stderr = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        raise subprocess.TimeoutExpired(
+            cmd, timeout_s, output=stdout, stderr=stderr
+        )
 
 
 # ---------- Patch tracking ----------
@@ -372,10 +438,25 @@ def _run_harness(
         if backend == "modal":
             cmd += ["--modal", "true"]
 
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=timeout_s, cwd=str(cache),
-        )
+        try:
+            proc = _run_subprocess_hard_timeout(
+                cmd, timeout_s=timeout_s, cwd=str(cache),
+            )
+        except subprocess.TimeoutExpired as exc:
+            # The harness subprocess (and its Modal grandchildren) exceeded
+            # the cap and were force-killed as a process group. Record an
+            # error verdict rather than letting the exception bubble — the
+            # caller's row stays well-formed and the cell keeps moving.
+            return {
+                "success": False,
+                "score": 0.0,
+                "details": {
+                    "reason": "harness_timeout",
+                    "timeout_s": timeout_s,
+                    "stdout": (exc.stdout or "")[-2000:],
+                    "stderr": (exc.stderr or "")[-2000:],
+                },
+            }
 
         report = _find_report(cache, instance_id, run_id)
         if report is None:

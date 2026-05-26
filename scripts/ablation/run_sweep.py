@@ -36,6 +36,7 @@ from typing import Dict, List, Optional, Tuple
 REPO_ROOT = Path("/matx/u/aspark/OpenJarvis")
 VENV_PY = REPO_ROOT / ".venv" / "bin" / "python"
 EXPERIMENTS_DIR = Path("/matx/u/aspark/.openjarvis/experiments/hybrid")
+RUNS_DIR = EXPERIMENTS_DIR / "runs"
 RESULTS_TABLE = EXPERIMENTS_DIR / "docs" / "results-table.md"
 LOG_DIR = Path("/tmp/hybrid-sweep-logs")
 AUTO_SECTION_HEADER = "## n=100 sweep — auto-generated"
@@ -300,7 +301,7 @@ class CellState:
 
     @property
     def out_dir(self) -> Path:
-        return EXPERIMENTS_DIR / self.name
+        return RUNS_DIR / self.name
 
     @property
     def results_path(self) -> Path:
@@ -897,7 +898,7 @@ def dry_run(cells: List[str]) -> int:
         print(f"  tier={t:<18s} cap={cap}  cells={len(names)}")
     print()
     print(f"Logs:    {LOG_DIR}/<cell>.r<round>.<ts>.log")
-    print(f"Outputs: {EXPERIMENTS_DIR}/<cell>/{{results.jsonl,summary.json}}")
+    print(f"Outputs: {RUNS_DIR}/<cell>/{{results.jsonl,summary.json}}")
     print(f"Table:   {RESULTS_TABLE}  (auto section: '{AUTO_SECTION_HEADER}')")
     return 0
 

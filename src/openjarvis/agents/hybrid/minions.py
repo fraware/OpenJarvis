@@ -45,11 +45,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openjarvis.agents._stubs import AgentContext
 from openjarvis.agents.hybrid._base import (
-    ANTHROPIC_WEB_SEARCH_TOOL,
     WEB_SEARCH_COST_PER_CALL,
     LocalCloudAgent,
     build_web_search_tool,
     web_search_cfg,
+)
+from openjarvis.agents.hybrid._openai_retry import (
+    patch_openai_globally as _patch_openai_globally,
 )
 from openjarvis.agents.hybrid._prices import NO_TEMP_PREFIXES
 from openjarvis.agents.hybrid.mini_swe_agent import run_swe_agent_loop
@@ -347,6 +349,7 @@ def _apply_patches_once() -> None:
     # Mirror the Anthropic patch for OpenAI so the Minions library's own
     # ``OpenAIClient`` instances pick up retry + per-org concurrency caps.
     # Idempotent — also applied at ``_base`` import time.
+    _patch_openai_globally()
     _patch_gemini_client_usage()
     _patch_minions_extract_json()
     _PATCHES_APPLIED = True
@@ -470,11 +473,11 @@ class MinionsAgent(LocalCloudAgent):
         from minions.clients.anthropic import (
             AnthropicClient,  # type: ignore[import-not-found]
         )
-        from minions.clients.openai import (
-            OpenAIClient,  # type: ignore[import-not-found]
-        )
         from minions.clients.gemini import (
             GeminiClient,  # type: ignore[import-not-found]
+        )
+        from minions.clients.openai import (
+            OpenAIClient,  # type: ignore[import-not-found]
         )
         from minions.minion import Minion  # type: ignore[import-not-found]
         from minions.minions import Minions  # type: ignore[import-not-found]

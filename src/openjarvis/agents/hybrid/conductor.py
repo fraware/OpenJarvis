@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -40,6 +41,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openjarvis.agents._stubs import AgentContext
 from openjarvis.agents.hybrid._base import (
+    GEMINI_SEARCH_COST_PER_CALL,
+    OPENAI_WEB_SEARCH_COST_PER_CALL,
     WEB_SEARCH_COST_PER_CALL,
     LocalCloudAgent,
     build_web_search_tool,
@@ -181,50 +184,131 @@ def _vllm_alive(base_url: str) -> bool:
 
 
 def _default_pool(local_model: Optional[str], local_endpoint: Optional[str]) -> List[Dict[str, Any]]:
+    """Default worker pool — faithful to the Sakana Conductor paper (arXiv 2512.04388).
+
+    The paper composes a heterogeneous 7-worker pool spanning three frontier
+    cloud models (Gemini-2.5-Pro, Claude Sonnet-4, GPT-5) and four open-weights
+    workers routed via OpenRouter (DeepSeek-R1-Distill-Qwen-32B, Gemma3-27B-it,
+    Qwen3-32B with reasoning off, Qwen3-32B with reasoning on). No local vLLM
+    worker is in the paper's default — cells that want one should supply it
+    explicitly via ``cfg["worker_pool"]``.
+
+    Each provider is gated by an ``OJ_CONDUCTOR_DISABLE_*`` env var so a cell
+    that lacks one set of credentials can still run the rest of the pool. If
+    every provider is disabled the result is the empty list — the caller's
+    "empty worker pool" check will surface it.
+
+    ``local_model`` / ``local_endpoint`` are accepted for signature stability
+    (callers still pass them) but no longer consulted here; the local vLLM is
+    only included when the user opts in via ``cfg["worker_pool"]``.
+    """
+    del local_model, local_endpoint  # paper default carries no local worker
     pool: List[Dict[str, Any]] = []
-    if local_model and local_endpoint and _vllm_alive(local_endpoint):
+    if not os.environ.get("OJ_CONDUCTOR_DISABLE_GEMINI"):
         pool.append({
             "id": len(pool),
-            "name": "local-qwen",
-            "endpoint": "vllm",
-            "model": local_model,
-            "base_url": local_endpoint,
-            "api_key": "EMPTY",
+            "name": "gemini-pro",
+            "endpoint": "gemini",
+            "model": "gemini-2.5-pro",
             "description": (
-                "Open-weights Qwen3.5 served locally. Cheap and fast. Good at "
-                "concise extraction, formatting, arithmetic on given data; "
-                "weaker at open-domain factual recall and complex reasoning."
+                "Google Gemini 2.5 Pro. Frontier multimodal reasoner with a "
+                "very large context window. Strong at long-document synthesis, "
+                "multi-hop factual reasoning, and tasks that benefit from "
+                "wide retrieval. Slower and pricier than mid-tier workers."
             ),
         })
-    pool.append({
-        "id": len(pool),
-        "name": "frontier-anthropic",
-        "endpoint": "anthropic",
-        "model": "claude-opus-4-7",
-        "description": (
-            "Frontier reasoning model. Strongest at multi-step reasoning, "
-            "careful instruction following, code, and writing. Expensive; "
-            "use sparingly for hard or decisive steps."
-        ),
-    })
-    pool.append({
-        "id": len(pool),
-        "name": "frontier-openai-mini",
-        "endpoint": "openai",
-        "model": "gpt-5-mini",
-        "description": (
-            "Mid-tier OpenAI model. Solid general knowledge and reasoning at "
-            "a fraction of frontier cost. Good default for retrieval-style or "
-            "broad-knowledge questions."
-        ),
-    })
+    if not os.environ.get("OJ_CONDUCTOR_DISABLE_ANTHROPIC"):
+        pool.append({
+            "id": len(pool),
+            "name": "claude-sonnet-4",
+            "endpoint": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "description": (
+                "Anthropic Claude Sonnet 4. Strong general-purpose reasoner "
+                "with careful instruction following and reliable formatting. "
+                "Good default for code, structured writing, and decisive "
+                "steps where accuracy matters more than raw throughput."
+            ),
+        })
+    if not os.environ.get("OJ_CONDUCTOR_DISABLE_OPENAI"):
+        pool.append({
+            "id": len(pool),
+            "name": "gpt-5",
+            "endpoint": "openai",
+            "model": "gpt-5",
+            "description": (
+                "OpenAI GPT-5. Frontier-tier broad-knowledge model. Best for "
+                "open-domain factual recall, creative generation, and "
+                "ambiguous questions where coverage matters. Expensive; use "
+                "for steps where breadth of world knowledge is the bottleneck."
+            ),
+        })
+    if not os.environ.get("OJ_CONDUCTOR_DISABLE_OPENROUTER"):
+        pool.append({
+            "id": len(pool),
+            "name": "deepseek-r1-distill-qwen-32b",
+            "endpoint": "openrouter",
+            "model": "deepseek/deepseek-r1-distill-qwen-32b",
+            "description": (
+                "DeepSeek R1 distilled into Qwen-32B (open weights via "
+                "OpenRouter). Specialized for chain-of-thought math, logic, "
+                "and competitive-programming-style problems. Verbose; "
+                "produces extensive reasoning traces before the final answer."
+            ),
+        })
+        pool.append({
+            "id": len(pool),
+            "name": "gemma3-27b-it",
+            "endpoint": "openrouter",
+            "model": "google/gemma-3-27b-it",
+            "description": (
+                "Google Gemma 3 27B Instruct (open weights via OpenRouter). "
+                "Mid-size instruction-tuned model. Cheap and fast; solid at "
+                "concise summarization, extraction, and short-form Q&A on "
+                "given context. Weaker than the frontier workers on multi-step "
+                "reasoning."
+            ),
+        })
+        pool.append({
+            "id": len(pool),
+            "name": "qwen3-32b",
+            "endpoint": "openrouter",
+            "model": "qwen/qwen3-32b",
+            "description": (
+                "Qwen3-32B in non-thinking mode (open weights via OpenRouter). "
+                "Fast general-purpose dialogue and instruction following. "
+                "Use when the step is straightforward generation, "
+                "summarization, or formatting — does NOT spend tokens on "
+                "internal reasoning."
+            ),
+        })
+        pool.append({
+            "id": len(pool),
+            "name": "qwen3-32b-thinking",
+            "endpoint": "openrouter",
+            "model": "qwen/qwen3-32b",
+            "extra_body": {"reasoning": {"effort": "medium"}},
+            "description": (
+                "Qwen3-32B with reasoning enabled (open weights via "
+                "OpenRouter). Same backbone as 'qwen3-32b' but spends tokens "
+                "on an internal chain of thought before answering. Stronger "
+                "on math, code, and multi-step logic; slower and consumes "
+                "more completion tokens. Prefer this for hard reasoning "
+                "steps; prefer the non-thinking variant for plain dialogue."
+            ),
+        })
+    # Reassign ids contiguously in case env-gates skipped some entries.
+    for new_id, entry in enumerate(pool):
+        entry["id"] = new_id
     return pool
 
 
 # Endpoints conductor's `_call_worker` actually knows how to dispatch to.
-# Web-search and gemini are NOT supported here — toolorchestra has the
-# web-search dispatcher; gemini isn't wired into _call_worker.
-_CONDUCTOR_VALID_ENDPOINTS = ("vllm", "openai", "anthropic")
+# Web-search is NOT supported here — toolorchestra has the web-search
+# dispatcher. OpenRouter is OpenAI-compatible; Gemini is text-only (no
+# tool-call parity with Anthropic — see `_base._call_gemini`). Both are
+# opt-in via cfg["worker_pool"] (not added to _default_pool).
+_CONDUCTOR_VALID_ENDPOINTS = ("vllm", "openai", "anthropic", "openrouter", "gemini")
 
 
 def _resolve_worker_pool(
@@ -241,8 +325,11 @@ def _resolve_worker_pool(
 
     Each user-supplied entry must be a dict with keys ``id``, ``name``,
     ``endpoint``, and ``model``. ``endpoint`` must be one of
-    ``vllm`` / ``openai`` / ``anthropic`` — conductor does not wire
-    web-search or gemini workers.
+    ``vllm`` / ``openai`` / ``anthropic`` / ``openrouter`` / ``gemini`` —
+    conductor does not wire web-search workers. OpenRouter workers route
+    through the OpenAI-compatible OpenRouter proxy; Gemini workers call
+    the google-genai SDK (text-only, no tool use). Both are opt-in via
+    ``cfg["worker_pool"]`` (not in the default pool).
 
     Substitution: ``model = "$local"`` (or ``"<local>"``) resolves to
     ``local_model``; ``model = "$cloud"`` / ``"<cloud>"`` to ``cloud_model``.
@@ -325,7 +412,11 @@ def _resolve_worker_pool(
         else:
             # Cloud workers: model must be priced (any unknown model would
             # silently cost $0, which masks billing mistakes downstream).
-            if model not in PRICES:
+            # OpenRouter is exempt — its model space is huge and varies
+            # per-provider; cost reporting for openrouter workers is 0
+            # (same as vllm). Cells that need accurate billing for an
+            # openrouter worker should add it to PRICES themselves.
+            if endpoint != "openrouter" and model not in PRICES:
                 raise ValueError(
                     f"Invalid worker_pool entry [{wid}]: model {model!r} is "
                     f"not in PRICES (known: {sorted(PRICES)})"
@@ -340,131 +431,21 @@ def _resolve_worker_pool(
     if not has_non_search:
         raise ValueError(
             "Invalid worker_pool entry [-]: worker_pool must contain at least "
-            "one non-search worker (vllm / openai / anthropic)"
+            "one non-search worker (vllm / openai / anthropic / openrouter / gemini)"
         )
-    return resolved
 
-
-# Endpoints conductor's `_call_worker` actually knows how to dispatch to.
-# Web-search and gemini are NOT supported here — toolorchestra has the
-# web-search dispatcher; gemini isn't wired into _call_worker.
-_CONDUCTOR_VALID_ENDPOINTS = ("vllm", "openai", "anthropic")
-
-
-def _resolve_worker_pool(
-    cfg: Dict[str, Any],
-    local_model: Optional[str],
-    local_endpoint: Optional[str],
-    cloud_model: str,
-) -> List[Dict[str, Any]]:
-    """Return the worker pool for this run.
-
-    Strict replace, not merge: if ``cfg["worker_pool"]`` is set, the
-    default pool is ignored entirely. Falls back to ``_default_pool`` when
-    the override is absent.
-
-    Each user-supplied entry must be a dict with keys ``id``, ``name``,
-    ``endpoint``, and ``model``. ``endpoint`` must be one of
-    ``vllm`` / ``openai`` / ``anthropic`` — conductor does not wire
-    web-search or gemini workers.
-
-    Substitution: ``model = "$local"`` (or ``"<local>"``) resolves to
-    ``local_model``; ``model = "$cloud"`` / ``"<cloud>"`` to ``cloud_model``.
-
-    On any validation failure, raises ``ValueError`` with the message
-    ``"Invalid worker_pool entry [<id>]: <reason>"``. Fails fast at agent
-    init rather than mid-task.
-    """
-    override = cfg.get("worker_pool")
-    if override is None:
-        return _default_pool(local_model, local_endpoint)
-    if not isinstance(override, list) or not override:
+    # The planner picks a worker by its `id` (it sees "Model <id> (<name>)"),
+    # but execution dispatches via `workers[model_id]` — list *position*. If a
+    # config supplies non-contiguous or out-of-order ids those two diverge and
+    # a plan that names worker N silently runs a different worker. Enforce
+    # contiguous 0..N-1 ids that equal list position so id == index always.
+    expected = list(range(len(resolved)))
+    actual = [w["id"] for w in resolved]
+    if actual != expected:
         raise ValueError(
-            "Invalid worker_pool entry [-]: worker_pool must be a non-empty list"
-        )
-
-    resolved: List[Dict[str, Any]] = []
-    seen_ids: set = set()
-    has_non_search = False
-    for raw in override:
-        wid_repr = raw.get("id", "?") if isinstance(raw, dict) else "?"
-        if not isinstance(raw, dict):
-            raise ValueError(
-                f"Invalid worker_pool entry [{wid_repr}]: entry must be a dict"
-            )
-        entry = dict(raw)
-        wid = entry.get("id")
-        if not isinstance(wid, int):
-            raise ValueError(
-                f"Invalid worker_pool entry [{wid_repr}]: 'id' must be an int"
-            )
-        if wid in seen_ids:
-            raise ValueError(
-                f"Invalid worker_pool entry [{wid}]: duplicate id"
-            )
-        seen_ids.add(wid)
-        if not entry.get("name") or not isinstance(entry["name"], str):
-            raise ValueError(
-                f"Invalid worker_pool entry [{wid}]: 'name' must be a non-empty string"
-            )
-        endpoint = entry.get("endpoint") or entry.get("type")
-        if not isinstance(endpoint, str) or endpoint.lower() not in _CONDUCTOR_VALID_ENDPOINTS:
-            raise ValueError(
-                f"Invalid worker_pool entry [{wid}]: 'endpoint' must be one of "
-                f"{_CONDUCTOR_VALID_ENDPOINTS} (got {endpoint!r})"
-            )
-        endpoint = endpoint.lower()
-        entry["endpoint"] = endpoint
-        # Substitute $local / $cloud placeholders.
-        model = entry.get("model")
-        if isinstance(model, str) and model in ("$local", "<local>"):
-            if not local_model:
-                raise ValueError(
-                    f"Invalid worker_pool entry [{wid}]: model='{model}' "
-                    "requires a local_model to be configured for this cell"
-                )
-            model = local_model
-            entry["model"] = model
-        elif isinstance(model, str) and model in ("$cloud", "<cloud>"):
-            model = cloud_model
-            entry["model"] = model
-        if not isinstance(model, str) or not model:
-            raise ValueError(
-                f"Invalid worker_pool entry [{wid}]: 'model' must be a non-empty string"
-            )
-        if endpoint == "vllm":
-            if not entry.get("base_url"):
-                # Default to the local endpoint if not specified — matches
-                # how _default_pool wires it.
-                if not local_endpoint:
-                    raise ValueError(
-                        f"Invalid worker_pool entry [{wid}]: vllm worker needs "
-                        "'base_url' (or a configured local_endpoint to fall back to)"
-                    )
-                entry["base_url"] = local_endpoint
-            entry.setdefault("api_key", "EMPTY")
-            # Local also counts as a non-search worker for the
-            # "must have at least one solver" check.
-            has_non_search = True
-        else:
-            # Cloud workers: model must be priced (any unknown model would
-            # silently cost $0, which masks billing mistakes downstream).
-            if model not in PRICES:
-                raise ValueError(
-                    f"Invalid worker_pool entry [{wid}]: model {model!r} is "
-                    f"not in PRICES (known: {sorted(PRICES)})"
-                )
-            has_non_search = True
-        entry.setdefault(
-            "description",
-            f"User-supplied {endpoint} worker ({model}).",
-        )
-        resolved.append(entry)
-
-    if not has_non_search:
-        raise ValueError(
-            "Invalid worker_pool entry [-]: worker_pool must contain at least "
-            "one non-search worker (vllm / openai / anthropic)"
+            f"Invalid worker_pool entry [-]: worker ids must be contiguous "
+            f"0..{len(resolved) - 1} in list order so the planner's model_id "
+            f"matches the dispatch index (got ids {actual}, expected {expected})"
         )
     return resolved
 
@@ -475,11 +456,55 @@ def _format_worker_pool(workers: List[Dict[str, Any]]) -> str:
     )
 
 
-def _build_conductor_prompt(question: str, workers: List[Dict[str, Any]]) -> str:
-    return (
+def _search_capable_indices(workers: List[Dict[str, Any]]) -> List[int]:
+    """Indices of workers whose endpoint can run server-side web search."""
+    return [
+        w["id"] for w in workers
+        if (w.get("endpoint") or "openai").lower()
+        in _SEARCH_CAPABLE_WORKER_ENDPOINTS
+    ]
+
+
+def _build_conductor_prompt(
+    question: str,
+    workers: List[Dict[str, Any]],
+    *,
+    web_search_enabled: bool = False,
+) -> str:
+    """Build the planner prompt.
+
+    When ``web_search_enabled`` is set (GAIA cells with web_search on),
+    append an explicit routing constraint: only the listed model indices
+    can perform web research, so any step that needs to look something up
+    on the web MUST be routed to one of them. Steps routed elsewhere
+    answer blind from parametric memory.
+    """
+    base = (
         f"Available models:\n{_format_worker_pool(workers)}\n\n"
         f"User question:\n{question}\n"
     )
+    if not web_search_enabled:
+        return base
+    capable = _search_capable_indices(workers)
+    if capable:
+        cap_str = ", ".join(str(i) for i in capable)
+        constraint = (
+            "\n\nWEB SEARCH CONSTRAINT:\n"
+            f"Only these model indices can perform live web search: [{cap_str}]. "
+            "Any step that needs to look up facts, current events, or other "
+            "information not reliably known from memory MUST be routed to one "
+            "of those indices. Steps routed to any other model can only use "
+            "their parametric memory and will answer such questions blind.\n"
+        )
+    else:
+        # No search-capable worker at all — the run-level guard raises
+        # before we get here, but keep the prompt honest just in case.
+        constraint = (
+            "\n\nWEB SEARCH CONSTRAINT:\n"
+            "No model in this pool can perform live web search; rely on the "
+            "models' own knowledge.\n"
+        )
+    return base + constraint
 
 
 def _build_step_prompt(
@@ -504,23 +529,42 @@ def _build_step_prompt(
 
 # ---------- Worker invocation ----------
 
+# Worker endpoints that can run server-side web search via a `_base`
+# agent loop. openrouter / vllm cannot ground.
+_SEARCH_CAPABLE_WORKER_ENDPOINTS = ("anthropic", "openai", "gemini")
+
+
+def _worker_search_cost_per_call(endpoint: str) -> float:
+    """Per-search-call USD cost for a worker's cloud endpoint."""
+    if endpoint == "openai":
+        return OPENAI_WEB_SEARCH_COST_PER_CALL
+    if endpoint == "gemini":
+        return GEMINI_SEARCH_COST_PER_CALL
+    return WEB_SEARCH_COST_PER_CALL
+
+
 def _call_worker(
     worker: Dict[str, Any],
     prompt: str,
     cfg: Dict[str, Any],
     *,
     web_search_tool: Optional[Dict[str, Any]] = None,
+    web_search_max_uses: int = 8,
 ) -> Tuple[str, int, int, bool, int]:
     """Returns (text, p_tok, c_tok, is_local, n_web_searches).
 
-    ``web_search_tool``: if set AND the worker endpoint is Anthropic, the
-    server-side web_search tool is declared on the call. ``n_web_searches``
-    is the actual count Anthropic ran. Non-Anthropic workers ignore it
-    and return 0.
+    ``web_search_tool``: a truthy marker that web_search is enabled for
+    this run. When set AND the worker endpoint is search-capable
+    (anthropic / openai / gemini), the worker call is routed through the
+    matching ``_base`` agent loop so the worker can ground its answer.
+    ``n_web_searches`` is the actual count the provider ran.
+    ``web_search_max_uses`` caps the Anthropic search tool.
+    Search-incapable workers (openrouter, vllm) ignore it and return 0.
     """
     ep = (worker.get("endpoint") or "openai").lower()
     max_tok = int(cfg.get("worker_max_tokens", 4096))
     temp = float(cfg.get("worker_temperature", 0.2))
+    use_ws = web_search_tool is not None
 
     if ep == "vllm":
         text, p, c = LocalCloudAgent._call_vllm(
@@ -533,11 +577,35 @@ def _call_worker(
         )
         return text, p, c, True, 0
     if ep == "openai":
+        if use_ws:
+            text, p, c, n_searches, _ = LocalCloudAgent._call_openai_agent(
+                worker["model"],
+                user=prompt,
+                max_tokens=max_tok,
+                temperature=(1.0 if is_gpt5_family(worker["model"]) else temp),
+            )
+            return text, p, c, False, n_searches
         text, p, c = LocalCloudAgent._call_openai(
             worker["model"],
             user=prompt,
             max_tokens=max_tok,
             temperature=(1.0 if is_gpt5_family(worker["model"]) else temp),
+        )
+        return text, p, c, False, 0
+    if ep == "openrouter":
+        # OpenRouter is OpenAI-compatible; the helper handles the
+        # base_url + OPENROUTER_API_KEY plumbing. No server-side web
+        # search wired here. is_local=False so tokens count as cloud.
+        # ``worker["extra_body"]`` (e.g. {"reasoning": {"effort": "medium"}})
+        # is forwarded to the SDK so paper-faithful workers like
+        # "qwen3-32b-thinking" can toggle reasoning per-call.
+        extra_body = worker.get("extra_body")
+        text, p, c = LocalCloudAgent._call_openrouter(
+            worker["model"],
+            user=prompt,
+            max_tokens=max_tok,
+            temperature=temp,
+            extra_body=extra_body if isinstance(extra_body, dict) else None,
         )
         return text, p, c, False, 0
     if ep == "anthropic":
@@ -553,6 +621,25 @@ def _call_worker(
             worker["model"], **anthropic_kwargs
         )
         return text, p, c, False, n_searches
+    if ep == "gemini":
+        # Gemini Developer API via google-genai. With web_search on, route
+        # through the Google-Search-grounded agent loop; otherwise plain
+        # text generation. is_local=False so tokens count as cloud.
+        if use_ws:
+            text, p, c, n_searches, _ = LocalCloudAgent._call_gemini_agent(
+                worker["model"],
+                user=prompt,
+                max_tokens=max_tok,
+                temperature=temp,
+            )
+            return text, p, c, False, n_searches
+        text, p, c = LocalCloudAgent._call_gemini(
+            worker["model"],
+            user=prompt,
+            max_tokens=max_tok,
+            temperature=temp,
+        )
+        return text, p, c, False, 0
     raise ValueError(f"unsupported worker endpoint: {ep!r}")
 
 
@@ -653,8 +740,27 @@ class ConductorAgent(LocalCloudAgent):
         if not workers:
             raise RuntimeError("conductor: empty worker pool")
 
-        # 1. Plan
-        user = _build_conductor_prompt(question, workers)
+        # Determine swe_mode up front — needed so the planner prompt can
+        # carry the GAIA web-search routing constraint (Task 3). SWE tasks
+        # use the bash tool, not web_search, so the constraint is GAIA-only.
+        task_meta_early = (
+            context.metadata.get("task") if context is not None else {}
+        ) or {}
+        swe_mode_early = (
+            bool(cfg.get("swe_use_agent_loop"))
+            and bool(task_meta_early.get("problem_statement"))
+            and bool(task_meta_early.get("repo"))
+            and bool(task_meta_early.get("base_commit"))
+        )
+        ws_enabled, ws_max_uses = web_search_cfg(cfg)
+        planner_ws = ws_enabled and not swe_mode_early
+
+        # 1. Plan — when web_search is on (GAIA), the prompt names which
+        # worker indices can actually search, so the planner routes
+        # research steps to a search-capable worker.
+        user = _build_conductor_prompt(
+            question, workers, web_search_enabled=planner_ws,
+        )
         plan_text, p_in, p_out = self._call_cloud(
             user=user,
             system=CONDUCTOR_SYS,
@@ -702,13 +808,10 @@ class ConductorAgent(LocalCloudAgent):
         # every worker step runs through run_swe_agent_loop on a SHARED
         # workdir so step N+1 builds on step N's edits. The final patch is
         # whatever `git diff` produces after the last step.
-        task_meta = (context.metadata.get("task") if context is not None else {}) or {}
-        swe_mode = (
-            bool(cfg.get("swe_use_agent_loop"))
-            and bool(task_meta.get("problem_statement"))
-            and bool(task_meta.get("repo"))
-            and bool(task_meta.get("base_commit"))
-        )
+        # ``task_meta`` / ``swe_mode`` were computed up front (see Task-3
+        # planner constraint above) — reuse them.
+        task_meta = task_meta_early
+        swe_mode = swe_mode_early
         steps: List[Dict[str, Any]] = []
         tokens_local = 0
         tokens_cloud = 0
@@ -720,10 +823,36 @@ class ConductorAgent(LocalCloudAgent):
         # web_search uses on GAIA. Conductor planner is text-only.
         tool_calls = 0
 
-        # Web_search opt-in: when enabled, declare the native server-side
-        # tool on Anthropic worker calls. GAIA-only — SWE workers use bash
-        # not web_search. OpenAI / vLLM workers ignore it.
-        ws_enabled, ws_max_uses = web_search_cfg(cfg)
+        # Web_search opt-in: when enabled, search-capable workers
+        # (anthropic / openai / gemini) route through their `_base` agent
+        # loop in `_call_worker` and ground their answers. GAIA-only — SWE
+        # workers use bash not web_search. openrouter / vllm workers can't
+        # ground and ignore the flag. If the worker pool has NO
+        # search-capable worker, web_search can never run on any step —
+        # every step would answer the GAIA question blind from parametric
+        # memory. Fail loud instead of degrading silently.
+        # ``ws_enabled`` / ``ws_max_uses`` computed up front for the planner
+        # constraint — reuse them here.
+        if ws_enabled and not swe_mode:
+            search_workers = [
+                w for w in workers
+                if (w.get("endpoint") or "openai").lower()
+                in _SEARCH_CAPABLE_WORKER_ENDPOINTS
+            ]
+            if not search_workers:
+                endpoints = sorted({
+                    (w.get("endpoint") or "openai").lower() for w in workers
+                })
+                raise ValueError(
+                    f"web_search.enabled=true but the worker pool has no "
+                    f"search-capable worker (endpoints present: {endpoints}); "
+                    "server-side web_search is wired only for anthropic / "
+                    "openai / gemini workers in conductor's _call_worker. "
+                    "Add one of those to the pool or disable web_search — "
+                    "otherwise every step answers blind from parametric memory."
+                )
+        # ``ws_tool`` doubles as the enable marker passed to `_call_worker`
+        # (truthy => route search-capable workers through their agent loop).
         ws_tool = (
             build_web_search_tool(ws_max_uses) if ws_enabled else None
         )
@@ -758,6 +887,30 @@ class ConductorAgent(LocalCloudAgent):
                     "swe_mode": swe_mode,
                 })
 
+                worker_ep = (worker.get("endpoint") or "openai").lower()
+                # Post-hoc routing check: if web_search is on but the
+                # planner routed this step to a search-incapable worker,
+                # record a warning into the trace (don't crash — the step
+                # may legitimately not need search; see Task-3 planner
+                # constraint that tries to prevent this upfront).
+                if (
+                    ws_enabled and not swe_mode
+                    and worker_ep not in _SEARCH_CAPABLE_WORKER_ENDPOINTS
+                ):
+                    self.record_trace_event({
+                        "kind": "conductor_search_routing_warning",
+                        "step_idx": i,
+                        "worker_id": mid,
+                        "worker_name": worker["name"],
+                        "worker_endpoint": worker_ep,
+                        "warning": (
+                            f"web_search enabled but step {i} routed to "
+                            f"search-incapable worker {worker['name']!r} "
+                            f"(endpoint {worker_ep!r}); this step cannot "
+                            "ground and may answer blind."
+                        ),
+                    })
+
                 if swe_mode:
                     text, w_in, w_out, is_local, n_searches, bash_turns = (
                         _swe_worker_step(
@@ -767,7 +920,9 @@ class ConductorAgent(LocalCloudAgent):
                     tool_calls += bash_turns
                 else:
                     text, w_in, w_out, is_local, n_searches = _call_worker(
-                        worker, prompt, cfg, web_search_tool=ws_tool,
+                        worker, prompt, cfg,
+                        web_search_tool=ws_tool,
+                        web_search_max_uses=ws_max_uses,
                     )
 
                 if is_local:
@@ -775,7 +930,7 @@ class ConductorAgent(LocalCloudAgent):
                 else:
                     tokens_cloud += w_in + w_out
                     cost += self.cost_usd(worker["model"], w_in, w_out)
-                    cost += n_searches * WEB_SEARCH_COST_PER_CALL
+                    cost += n_searches * _worker_search_cost_per_call(worker_ep)
                 n_web_searches_total += n_searches
                 tool_calls += n_searches
                 steps.append({

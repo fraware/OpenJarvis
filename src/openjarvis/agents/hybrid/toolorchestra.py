@@ -867,11 +867,17 @@ def _call_worker(
         )
         return text, p, c, True, 0.0, 0
     if wtype == "openai":
-        eff_temp = 1.0 if is_gpt5_family(worker["model"]) else temp
+        is_gpt5 = is_gpt5_family(worker["model"])
+        eff_temp = 1.0 if is_gpt5 else temp
+        # GPT-5 is a reasoning model: hidden reasoning tokens count against
+        # `max_completion_tokens`, so a 4096 cap can be fully consumed by
+        # reasoning and leave 0 visible content (empty answer). Give the
+        # reasoning headroom on top of the answer budget.
+        eff_max_tok = max(max_tok, 16384) if is_gpt5 else max_tok
         text, p, c = LocalCloudAgent._call_openai(
             worker["model"],
             user=prompt,
-            max_tokens=max_tok,
+            max_tokens=eff_max_tok,
             temperature=eff_temp,
         )
         return text, p, c, False, 0.0, 0
@@ -1347,54 +1353,46 @@ class ToolOrchestraAgent(LocalCloudAgent):
                 # tools verbatim. In paper-mode we use the local helper so we
                 # get the SDK-level ``tool_calls`` object back — `_call_vllm`
                 # returns just text and loses the call when vLLM's parser
-                # caught it (silently falls through to answer-1 fallback).
-                # Default mode keeps the legacy call for byte-identical output
-                # on existing cells.
-                if paper_mode:
-                    text, o_in, o_out, sdk_tool_calls = _call_orchestrator_with_tool_calls(
-                        orch_model,
-                        orch_endpoint,
-                        user=user,
-                        system=RL_ORCHESTRATOR_SYS,
-                        max_tokens=orch_max_tokens,
-                        temperature=orch_temp,
-                        tools=RL_TOOLS_SPEC,
-                    )
-                    self.record_trace_event({
-                        "kind": "vllm",
-                        "role": "orchestrator",
-                        "model": orch_model,
-                        "endpoint": orch_endpoint,
-                        "system": RL_ORCHESTRATOR_SYS,
-                        "user": user,
-                        "response": text,
-                        "tool_calls": [
-                            {
-                                "id": getattr(tc, "id", None),
-                                "type": getattr(tc, "type", None),
-                                "function": {
-                                    "name": getattr(getattr(tc, "function", None), "name", None),
-                                    "arguments": getattr(getattr(tc, "function", None), "arguments", None),
-                                },
-                            }
-                            for tc in (sdk_tool_calls or [])
-                        ],
-                        "tokens_in": o_in,
-                        "tokens_out": o_out,
-                    })
-                else:
-                    text, o_in, o_out = LocalCloudAgent._call_vllm(
-                        orch_model,
-                        orch_endpoint,
-                        user=user,
-                        system=RL_ORCHESTRATOR_SYS,
-                        max_tokens=orch_max_tokens,
-                        temperature=orch_temp,
-                        enable_thinking=False,
-                        tools=RL_TOOLS_SPEC,
-                        trace_role="orchestrator",
-                    )
-                    sdk_tool_calls = None
+                # caught it. Orchestrator-8B emits its routing decision in the
+                # OpenAI-native ``tool_calls`` array with an empty text body,
+                # so the legacy `_call_vllm` path saw nothing and silently fell
+                # through to the answer-1 fallback (parse_failures: 2 on every
+                # non-opus-gaia cell — see docs/reports/toolorchestra.md). Both
+                # modes now use `_call_orchestrator_with_tool_calls` so the
+                # parser can read structured tool calls; the text-tag path in
+                # `_parse_rl_tool_call` is still the fallback when `tool_calls`
+                # is empty.
+                text, o_in, o_out, sdk_tool_calls = _call_orchestrator_with_tool_calls(
+                    orch_model,
+                    orch_endpoint,
+                    user=user,
+                    system=RL_ORCHESTRATOR_SYS,
+                    max_tokens=orch_max_tokens,
+                    temperature=orch_temp,
+                    tools=RL_TOOLS_SPEC,
+                )
+                self.record_trace_event({
+                    "kind": "vllm",
+                    "role": "orchestrator",
+                    "model": orch_model,
+                    "endpoint": orch_endpoint,
+                    "system": RL_ORCHESTRATOR_SYS,
+                    "user": user,
+                    "response": text,
+                    "tool_calls": [
+                        {
+                            "id": getattr(tc, "id", None),
+                            "type": getattr(tc, "type", None),
+                            "function": {
+                                "name": getattr(getattr(tc, "function", None), "name", None),
+                                "arguments": getattr(getattr(tc, "function", None), "arguments", None),
+                            },
+                        }
+                        for tc in (sdk_tool_calls or [])
+                    ],
+                    "tokens_in": o_in,
+                    "tokens_out": o_out,
+                })
                 tokens_local += o_in + o_out
 
                 action = _parse_rl_tool_call(text, sdk_tool_calls)

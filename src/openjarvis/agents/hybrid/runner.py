@@ -8,7 +8,7 @@ Reads a cell definition from ``registry/<method>.toml`` (bundled with this
 package or pointed at by ``OPENJARVIS_HYBRID_REGISTRY_DIR``), constructs
 the registered agent, loads bench tasks via OpenJarvis's existing dataset
 providers, runs every task, scores it, and writes
-``<EXPERIMENTS_DIR>/<cell>/results.jsonl`` + ``summary.json``.
+``<EXPERIMENTS_DIR>/runs/<cell>/results.jsonl`` + ``summary.json``.
 
 The output schema matches ``hybrid-local-cloud-compute/runner.py`` so the
 existing rescore / dashboard scripts can read OpenJarvis cells without
@@ -26,6 +26,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -36,6 +37,7 @@ except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
 from openjarvis.agents._stubs import AgentContext, AgentResult
+from openjarvis.agents.hybrid._energy import EnergyCollector
 from openjarvis.agents.hybrid._prompts import format_prompt as _format_prompt
 
 PACKAGE_DIR = Path(__file__).parent
@@ -47,6 +49,22 @@ DEFAULT_EXPERIMENTS_DIR = Path(
     )
 )
 DEFAULT_SUBSETS_DIR = DEFAULT_EXPERIMENTS_DIR / "subsets"
+DEFAULT_RUNS_DIR = DEFAULT_EXPERIMENTS_DIR / "runs"
+
+# Hard per-task wall-clock cap. Even when every individual network /
+# subprocess call has its own timeout, a pathological chain (SDK retries
+# stacking on top of a hung connection, a Modal harness subprocess whose
+# grandchildren keep its stdout pipe open, etc.) can leave one task
+# blocked indefinitely — and with the runner's ThreadPoolExecutor that
+# wedges the whole cell (`as_completed` never advances). SWE-bench tasks
+# legitimately run ~15-20 min, so the default cap is 30 min: long enough
+# never to abort a healthy task, short enough that a frozen one is
+# abandoned and recorded as an error row (which the resume logic re-runs)
+# instead of silently killing the process. Override with
+# ``OPENJARVIS_HYBRID_TASK_TIMEOUT_S`` (0 / negative disables).
+DEFAULT_TASK_TIMEOUT_S = float(
+    os.environ.get("OPENJARVIS_HYBRID_TASK_TIMEOUT_S", "1800") or 1800
+)
 
 
 # ---------- Registry ----------
@@ -230,29 +248,67 @@ def _apply_subset(
 
 # ---------- Scoring ----------
 
-def _score_gaia(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
-    """Exact-match-with-format-normalization GAIA scorer.
+_GAIA_SCORER = None
+_GAIA_SCORER_LOCK = threading.Lock()
 
-    Lightweight version: extracts the final-answer line and string-compares
-    against the reference. Use the OpenJarvis gaia_exact scorer for the
-    judge-tiebreaker path.
+
+def _get_gaia_scorer():
+    """Lazily build the shared GAIA scorer (normalized exact-match + LLM judge).
+
+    Judge model defaults to ``gpt-5-mini-2025-08-07`` (override via
+    ``OPENJARVIS_GAIA_JUDGE_MODEL``); the judge backend is the ``cloud``
+    engine, so ``OPENJARVIS_CONFIG`` needs a ``[engine.cloud]`` section.
     """
-    import re
+    global _GAIA_SCORER
+    if _GAIA_SCORER is None:
+        with _GAIA_SCORER_LOCK:
+            if _GAIA_SCORER is None:
+                from openjarvis.evals.backends.jarvis_direct import (
+                    JarvisDirectBackend,
+                )
+                from openjarvis.evals.scorers.gaia_exact import GAIAScorer
+
+                judge_model = os.environ.get(
+                    "OPENJARVIS_GAIA_JUDGE_MODEL", "gpt-5-mini-2025-08-07"
+                )
+                try:
+                    backend = JarvisDirectBackend(engine_key="cloud")
+                except Exception:  # noqa: BLE001
+                    backend = None
+                _GAIA_SCORER = GAIAScorer(backend, judge_model)
+    return _GAIA_SCORER
+
+
+def _score_gaia(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
+    """GAIA scorer — normalized exact-match with an LLM-judge fallback.
+
+    Uses the shared OpenJarvis :class:`GAIAScorer`. The previous version
+    only credited answers that emitted a literal ``FINAL ANSWER:`` line and
+    string-matched it; a verbose answer that stated the right answer in
+    prose silently scored 0. Opus emits the marker ~92% of the time but
+    GPT-5-mini / Haiku almost never do, so their GAIA cells were badly
+    undercounted. The judge recovers the answer from prose instead.
+    """
+    from openjarvis.evals.core.types import EvalRecord
 
     ref = (task.get("reference") or "").strip()
     if not ref:
         return {"success": False, "score": 0.0, "details": {"reason": "no_reference"}}
-    m = re.search(
-        r"FINAL\s*ANSWER\s*:\s*(.+?)\s*$",
-        answer,
-        re.IGNORECASE | re.MULTILINE,
+
+    record = EvalRecord(
+        record_id=str(task.get("task_id") or ""),
+        problem=str(task.get("question") or ""),
+        reference=ref,
+        category="agentic",
+        metadata=dict(task.get("metadata") or {}),
     )
-    pred = (m.group(1).strip() if m else answer.strip()).rstrip(".").strip()
-    success = pred.lower() == ref.lower()
+    is_correct, details = _get_gaia_scorer().score(record, answer or "")
+    details = dict(details or {})
+    details.setdefault("reference", ref)
     return {
-        "success": success,
-        "score": 1.0 if success else 0.0,
-        "details": {"prediction": pred, "reference": ref},
+        "success": bool(is_correct),
+        "score": 1.0 if is_correct else 0.0,
+        "details": details,
     }
 
 
@@ -379,7 +435,26 @@ def _build_agent(cell: Dict[str, Any]):
     )
 
 
-def _run_one(agent, bench: str, task: Dict[str, Any], log_dir: str) -> Dict[str, Any]:
+def _error_row(task: Dict[str, Any], t0: float, error: str) -> Dict[str, Any]:
+    """Build a hybrid-shape error row (kept null-shaped like the catch path
+    in :func:`_run_one` so the resume logic re-runs it)."""
+    return {
+        "task_id": task["task_id"],
+        "answer": "",
+        "tokens_local": 0, "tokens_cloud": 0,
+        "cost_usd": 0.0, "latency_s": time.time() - t0,
+        "web_search_uses": 0,
+        "tool_calls": 0,
+        "n_cloud_calls": 0,
+        "n_local_calls": 0,
+        "traces": {},
+        "error": error,
+    }
+
+
+def _run_one_inner(
+    agent, bench: str, task: Dict[str, Any], log_dir: str
+) -> Dict[str, Any]:
     """Run the agent on one task. Returns a hybrid-shape row."""
     prompt = _format_prompt(task)
     ctx = AgentContext(metadata={
@@ -408,18 +483,70 @@ def _run_one(agent, bench: str, task: Dict[str, Any], log_dir: str) -> Dict[str,
             out["soft_error"] = meta["soft_error"]
         return {**out, "error": None}
     except Exception as e:
-        return {
-            "task_id": task["task_id"],
-            "answer": "",
-            "tokens_local": 0, "tokens_cloud": 0,
-            "cost_usd": 0.0, "latency_s": time.time() - t0,
-            "web_search_uses": 0,
-            "tool_calls": 0,
-            "n_cloud_calls": 0,
-            "n_local_calls": 0,
-            "traces": {},
-            "error": f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
-        }
+        return _error_row(
+            task, t0, f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        )
+
+
+def _run_one(
+    agent,
+    bench: str,
+    task: Dict[str, Any],
+    log_dir: str,
+    *,
+    task_timeout_s: float = DEFAULT_TASK_TIMEOUT_S,
+) -> Dict[str, Any]:
+    """Run one task under a hard wall-clock cap.
+
+    ``_run_one_inner`` runs on a dedicated **daemon** thread; if it doesn't
+    finish within ``task_timeout_s`` we give up on it and record a
+    ``TaskTimeout`` error row. The worker thread is then *abandoned* — a
+    truly wedged task (hung socket read with no enforced timeout, a Modal
+    harness subprocess deadlocked draining pipes) cannot be killed
+    cooperatively in CPython, so leaking the thread is the only safe
+    option. It's a daemon thread, so it never blocks process exit, and the
+    leak is bounded (one per timed-out task) — far cheaper than letting the
+    whole cell freeze on the runner's ``as_completed`` join. The error row
+    makes the resume logic re-run the task on the next invocation.
+
+    ``task_timeout_s <= 0`` disables the cap (runs inline, legacy behavior).
+    """
+    t0 = time.time()
+    if task_timeout_s <= 0:
+        return _run_one_inner(agent, bench, task, log_dir)
+
+    box: Dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            box["row"] = _run_one_inner(agent, bench, task, log_dir)
+        except BaseException as e:  # noqa: BLE001 — never let the worker die silently
+            box["row"] = _error_row(
+                task, t0, f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            )
+
+    worker = threading.Thread(
+        target=_target,
+        name=f"hybrid-task-{task['task_id']}",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=task_timeout_s)
+    if worker.is_alive():
+        print(
+            f"[timeout] task={task['task_id']} exceeded "
+            f"{task_timeout_s/60:.1f}m — abandoning worker, recording error row",
+            flush=True,
+        )
+        return _error_row(
+            task, t0,
+            f"TaskTimeout: task exceeded the {task_timeout_s:.0f}s hybrid "
+            "per-task wall-clock cap (likely a hung network or Modal-harness "
+            "call); worker thread abandoned, task left for resume.",
+        )
+    return box.get("row") or _error_row(
+        task, t0, "TaskError: worker thread exited without producing a row."
+    )
 
 
 def _heartbeat(done: int, total: int, row: Dict[str, Any], t_start: float) -> None:
@@ -444,6 +571,7 @@ def _write_summary(
     tasks: List[Dict[str, Any]],
     t_start: float,
     n_processed: int = -1,
+    energy_j_session: float = 0.0,
 ) -> None:
     results_path = out_dir / "results.jsonl"
     rows = [
@@ -472,17 +600,23 @@ def _write_summary(
     # partial-resumes still report total wall time honestly.
     summary_path = out_dir / "summary.json"
     prior_wall = 0.0
+    prior_energy = 0.0
     if summary_path.exists():
         try:
-            prior_wall = float(
-                json.loads(summary_path.read_text()).get("wall_time_s", 0.0) or 0.0
-            )
+            prior = json.loads(summary_path.read_text())
+            prior_wall = float(prior.get("wall_time_s", 0.0) or 0.0)
+            prior_energy = float(prior.get("energy_j_total", 0.0) or 0.0)
         except Exception:
             prior_wall = 0.0
+            prior_energy = 0.0
     if n_processed == 0 and prior_wall > 0:
         wall = prior_wall
+        # No work done this session → keep prior energy total (don't add a
+        # spurious idle-load reading from a resume that processed nothing).
+        energy_j = prior_energy
     else:
         wall = prior_wall + elapsed
+        energy_j = prior_energy + float(energy_j_session or 0.0)
 
     summary = {
         "cell": cell_name,
@@ -500,13 +634,21 @@ def _write_summary(
         "n_local_calls_total": total_local_calls,
         "cost_usd_total": total_cost,
         "wall_time_s": wall,
+        # GPU energy integrated over the cell's wall-time across the GPUs
+        # visible to the runner host. Cloud energy is **not** included —
+        # see ``_energy.py``. Joules; sum of session + any prior resumes.
+        # TODO: decide whether to add a cloud J/token estimate; for now 0
+        # cloud contribution. (Patterson 2021 / Luccioni 2022 are options.)
+        "energy_j_total": energy_j,
         "task_count": len(tasks),
     }
     summary_path.write_text(json.dumps(summary, indent=2))
     print(
         f"[summary] {cell_name}: n={n_done}/{cell['n']} err={n_err} "
         f"acc={acc:.3f} cost=${total_cost:.2f} time={wall/60:.1f}m "
-        f"(session +{elapsed/60:.1f}m, processed={n_processed})",
+        f"energy={energy_j/1000:.1f}kJ "
+        f"(session +{elapsed/60:.1f}m +{energy_j_session/1000:.1f}kJ, "
+        f"processed={n_processed})",
         flush=True,
     )
 
@@ -519,7 +661,7 @@ def run_cell(
     resume: bool = True,
     root: Optional[Path] = None,
 ) -> None:
-    out_root = root or DEFAULT_EXPERIMENTS_DIR
+    out_root = root or DEFAULT_RUNS_DIR
     out_dir = _cell_dir(cell_name, out_root)
     with _cell_lock(out_dir, cell_name):
         _run_cell_locked(
@@ -580,15 +722,27 @@ def _run_cell_locked(
     if concurrency > 1:
         print(f"[concurrency] {concurrency} workers", flush=True)
 
+    # Hard per-task wall-clock cap. A cell may override it via the registry
+    # (``method_cfg.task_timeout_s``); otherwise the process-wide default
+    # (env ``OPENJARVIS_HYBRID_TASK_TIMEOUT_S``, 1800s) applies. 0 disables.
+    mcfg = cell.get("method_cfg") or {}
+    task_timeout_s = float(mcfg.get("task_timeout_s", DEFAULT_TASK_TIMEOUT_S))
+    if task_timeout_s > 0:
+        print(f"[task-timeout] {task_timeout_s/60:.1f}m per task", flush=True)
+
     agent = _build_agent(cell)
 
     t_start = time.time()
     write_lock = threading.Lock()
     completed = [0]
+    written_ok_ids: set = set()
     log_dir = str(out_dir / "logs")
 
     def _process(task: Dict[str, Any]) -> None:
-        row = _run_one(agent, cell["bench"], task, log_dir)
+        row = _run_one(
+            agent, cell["bench"], task, log_dir,
+            task_timeout_s=task_timeout_s,
+        )
         scored: Optional[Dict[str, Any]] = None
         if do_score and row.get("error") is None:
             try:
@@ -601,22 +755,39 @@ def _run_cell_locked(
                     "details": {"score_error": str(e)},
                 }
         full_row = {**row, "score": scored}
-        with write_lock, results_path.open("a") as f:
-            f.write(json.dumps(full_row) + "\n")
-            f.flush()
+        with write_lock:
+            # Idempotency guard: a Modal retry can re-run the same task within
+            # one process. Skip appending once a non-error row exists for this
+            # task_id so results.jsonl never carries duplicate rows.
+            if full_row["task_id"] in written_ok_ids:
+                return
+            with results_path.open("a") as f:
+                f.write(json.dumps(full_row) + "\n")
+                f.flush()
+            if full_row.get("error") is None:
+                written_ok_ids.add(full_row["task_id"])
             completed[0] += 1
             _heartbeat(completed[0], len(tasks), full_row, t_start)
 
-    if concurrency == 1:
-        for task in pending:
-            _process(task)
-    else:
-        with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            futures = [ex.submit(_process, t) for t in pending]
-            for fut in as_completed(futures):
-                fut.result()
+    # GPU energy sampler covers the same wall-clock window as ``wall_time_s``
+    # so the two numbers can be divided into an effective Watts figure.
+    # Sampler is best-effort: NVML failures degrade to ``energy_j_total=0``
+    # without crashing the run (see ``_energy.py``).
+    with EnergyCollector() as energy:
+        if concurrency == 1:
+            for task in pending:
+                _process(task)
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                futures = [ex.submit(_process, t) for t in pending]
+                for fut in as_completed(futures):
+                    fut.result()
 
-    _write_summary(out_dir, cell_name, cell, tasks, t_start, n_processed=len(pending))
+    _write_summary(
+        out_dir, cell_name, cell, tasks, t_start,
+        n_processed=len(pending),
+        energy_j_session=energy.energy_j_total,
+    )
 
 
 # ---------- CLI ----------
@@ -668,6 +839,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "DEFAULT_EXPERIMENTS_DIR",
+    "DEFAULT_RUNS_DIR",
     "DEFAULT_REGISTRY_DIR",
     "load_registry",
     "load_tasks",

@@ -238,15 +238,25 @@ def test_local_substitution_without_local_model_raises() -> None:
 
 
 def test_no_override_uses_default_pool_conductor() -> None:
-    # No `worker_pool` key — resolver returns the default pool. We don't
-    # exercise `_vllm_alive` here (no local_model configured), so the
-    # default is just the two cloud workers.
+    # No `worker_pool` key — resolver returns the default pool, which is the
+    # paper-faithful 7-worker composition (arXiv 2512.04388): Gemini-2.5-Pro,
+    # Claude Sonnet-4, GPT-5, plus four OpenRouter-routed open-weights
+    # workers (DeepSeek-R1-Distill-Qwen-32B, Gemma3-27B-it, Qwen3-32B,
+    # Qwen3-32B-thinking).
     agent = _conductor({})
     resolved = _resolve_conductor_pool(
         agent._cfg, agent._local_model, agent._local_endpoint, agent._cloud_model,
     )
     names = {w["name"] for w in resolved}
-    assert names == {"frontier-anthropic", "frontier-openai-mini"}
+    assert names == {
+        "gemini-pro",
+        "claude-sonnet-4",
+        "gpt-5",
+        "deepseek-r1-distill-qwen-32b",
+        "gemma3-27b-it",
+        "qwen3-32b",
+        "qwen3-32b-thinking",
+    }
 
 
 def test_no_override_uses_default_pool_toolorch() -> None:

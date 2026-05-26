@@ -23,6 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 HYBRID_ROOT = Path("/matx/u/aspark/.openjarvis/experiments/hybrid")
+RUNS_DIR = HYBRID_ROOT / "runs"
 DOCS_DIR = HYBRID_ROOT / "docs"
 OUT_HTML = DOCS_DIR / "index.html"
 RAW_MD = DOCS_DIR / "results-table.md"
@@ -105,7 +106,7 @@ class Cell:
 
 def load_cells() -> list[Cell]:
     out = []
-    for d in sorted(HYBRID_ROOT.iterdir()):
+    for d in sorted(RUNS_DIR.iterdir()):
         if not (d.is_dir() and d.name.endswith("-n100")):
             continue
         sj = d / "summary.json"

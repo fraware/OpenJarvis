@@ -37,13 +37,16 @@ kwargs (``local_model``, ``local_endpoint``, ``cloud_endpoint``, …) follow.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from abc import abstractmethod
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from openjarvis.agents._stubs import AgentContext, AgentResult, BaseAgent
+from openjarvis.agents.hybrid._openai_retry import patch_openai_globally
 from openjarvis.agents.hybrid._prices import (
     NO_TEMP_PREFIXES,
     is_gpt5_family,
@@ -54,8 +57,28 @@ from openjarvis.agents.hybrid._prices import (
 )
 from openjarvis.engine._stubs import InferenceEngine
 
+# Install OpenAI SDK retry + per-org concurrency cap at import time so
+# every paradigm (advisors, conductor, minions, mini_swe_agent's cloud
+# loop, archon, …) inherits the hardening without each call site having
+# to remember to opt in. See ``_openai_retry.py`` for the env knobs
+# (default: 4 concurrent, 8 retries, 2s/60s exponential backoff w/ jitter).
+patch_openai_globally()
+
 # Anthropic server-side web_search: $10 per 1000 searches.
 WEB_SEARCH_COST_PER_CALL = 0.01
+
+# OpenAI Responses-API hosted web_search tool: $10 per 1000 calls
+# (2025-12 public list price for the `web_search` / `web_search_preview`
+# tool, billed per tool call). Same shape as Anthropic, so we reuse the
+# $0.01/call number — kept as a separate constant so it can drift.
+OPENAI_WEB_SEARCH_COST_PER_CALL = 0.01
+
+# Gemini Google-Search grounding: billed at $35 per 1000 grounded
+# *requests* (2025-12 public list price for the Grounding-with-Google-Search
+# tool, charged once per request that uses the tool regardless of how many
+# internal queries it issues). We charge per grounded request, not per
+# `web_search_queries` entry.
+GEMINI_SEARCH_COST_PER_CALL = 0.035
 
 ANTHROPIC_WEB_SEARCH_TOOL = {
     "type": "web_search_20250305",
@@ -166,6 +189,83 @@ def _open_call_counts() -> Dict[str, int]:
 def _close_call_counts() -> None:
     if hasattr(_CALL_COUNTS, "counts"):
         delattr(_CALL_COUNTS, "counts")
+
+
+# ---------- OpenRouter in-process rate limiter ----------
+#
+# OpenRouter enforces per-account RPM and concurrency limits. A single agent
+# process running a wide ThreadPoolExecutor (Conductor's 7-worker pool fanned
+# across the runner's per-task threads) can trivially blow past those caps,
+# triggering 429s that the OpenAI SDK retries with backoff — wasted latency
+# and noisy traces.
+#
+# We gate every ``_call_openrouter`` call through two limits, **shared across
+# threads in this Python process** (singleton; lazy-initialized):
+#
+# - **Concurrency** — a ``threading.Semaphore``. Default 20 in-flight calls;
+#   override via ``OJ_OPENROUTER_MAX_CONCURRENT``. Held only around the SDK
+#   ``client.chat.completions.create`` invocation, not the bookkeeping.
+# - **RPM** — a sliding window of timestamps in a ``deque``. Default 60
+#   requests/minute; override via ``OJ_OPENROUTER_RPM``. If the deque has
+#   already accumulated ``RPM`` timestamps within the last 60 seconds, the
+#   caller sleeps until the oldest entry ages out, then proceeds. Every
+#   completed call appends ``time.time()`` so the call we just made is
+#   counted against the next window.
+#
+# Other cloud helpers (``_call_openai`` / ``_call_anthropic`` / ``_call_gemini``)
+# are NOT rate-limited here — OpenAI and Anthropic have their own concurrency
+# patch (``_openai_retry``) and Gemini's free-tier RPM is loose enough that
+# we haven't hit it yet. Add limiters for those one-by-one if needed.
+
+_OPENROUTER_LIMITER_LOCK = threading.Lock()
+_OPENROUTER_LIMITER: Optional["_OpenRouterLimiter"] = None
+
+
+class _OpenRouterLimiter:
+    """Process-wide concurrency + sliding-window RPM gate for OpenRouter."""
+
+    def __init__(self, max_concurrent: int, rpm: int) -> None:
+        self.max_concurrent = int(max_concurrent)
+        self.rpm = int(rpm)
+        self._sem = threading.Semaphore(self.max_concurrent)
+        self._window: Deque[float] = deque()
+        self._window_lock = threading.Lock()
+
+    def acquire_concurrency(self) -> None:
+        self._sem.acquire()
+
+    def release_concurrency(self) -> None:
+        self._sem.release()
+
+    def wait_for_rpm_slot(self) -> None:
+        """Block until making one more call would not exceed RPM in 60s."""
+        while True:
+            with self._window_lock:
+                now = time.time()
+                cutoff = now - 60.0
+                while self._window and self._window[0] < cutoff:
+                    self._window.popleft()
+                if len(self._window) < self.rpm:
+                    return
+                # Sleep until the oldest in-window call ages out, then recheck.
+                sleep_s = 60.0 - (now - self._window[0]) + 0.01
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+
+    def record_call(self) -> None:
+        with self._window_lock:
+            self._window.append(time.time())
+
+
+def _openrouter_limiter() -> _OpenRouterLimiter:
+    global _OPENROUTER_LIMITER
+    if _OPENROUTER_LIMITER is None:
+        with _OPENROUTER_LIMITER_LOCK:
+            if _OPENROUTER_LIMITER is None:
+                max_concurrent = int(os.environ.get("OJ_OPENROUTER_MAX_CONCURRENT", "20") or 20)
+                rpm = int(os.environ.get("OJ_OPENROUTER_RPM", "60") or 60)
+                _OPENROUTER_LIMITER = _OpenRouterLimiter(max_concurrent, rpm)
+    return _OPENROUTER_LIMITER
 
 
 def _serialize_block(block: Any) -> Dict[str, Any]:
@@ -295,13 +395,16 @@ class LocalCloudAgent(BaseAgent):
         tool_choice: Optional[dict] = None,
         output_config: Optional[dict] = None,
         timeout: float = 600.0,
-        max_retries: int = 5,
+        max_retries: int = 12,
         trace_role: str = "cloud",
     ) -> Tuple[str, int, int, int]:
         """Single Anthropic call. Returns (text, p_tok, c_tok, n_web_searches).
 
         Strips ``temperature`` for Opus 4.7+ (rejected by the API). Captures
-        the call into the active per-task trace if one is open.
+        the call into the active per-task trace if one is open. Bumped
+        default max_retries to 12 (~2 min of backoff) so cells survive
+        sustained Anthropic 529 "Overloaded" windows when many cells share
+        Opus quota.
         """
         import anthropic
 
@@ -420,6 +523,111 @@ class LocalCloudAgent(BaseAgent):
             "response_format": response_format,
             "tools_declared": tools,
             "tool_choice": tool_choice,
+            "finish_reason": getattr(choice, "finish_reason", None),
+            "latency_s": latency,
+            "ts": time.time(),
+        })
+        return text, p, c
+
+    @staticmethod
+    def _call_openrouter(
+        model: str,
+        *,
+        user: str,
+        system: Optional[str] = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.0,
+        timeout: float = 600.0,
+        trace_role: str = "cloud",
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, int, int]:
+        """Single OpenRouter call. Returns (text, p_tok, c_tok).
+
+        OpenRouter is OpenAI-API-compatible; we use the OpenAI SDK with a
+        custom ``base_url`` and ``OPENROUTER_API_KEY``. ``model`` is the
+        OpenRouter slug ``"<provider>/<model>"`` (e.g.
+        ``"deepseek/deepseek-r1"``). For convenience the caller may also
+        pass the OpenJarvis-engine-style ``"openrouter/<provider>/<model>"``
+        prefix (see ``src/openjarvis/engine/cloud.py``) — we strip it here.
+
+        Note: unlike ``_call_openai``, we do NOT apply the GPT-5 family
+        ``max_completion_tokens`` rewrite or temperature stripping —
+        OpenRouter models have varied parameter support. We pass through
+        whatever the caller supplies; if a specific model errors on
+        ``temperature``, that's the cell's problem to handle.
+
+        ``extra_body`` is forwarded to the OpenAI SDK as the ``extra_body``
+        kwarg so callers can pass OpenRouter-specific fields (e.g.
+        ``{"reasoning": {"effort": "medium"}}`` to enable thinking on Qwen3,
+        or ``{"provider": {...}}`` to pin routing). The SDK serializes
+        ``extra_body`` into the JSON request body alongside the standard
+        fields.
+
+        Every call goes through the process-wide
+        ``_OpenRouterLimiter`` (concurrency semaphore + sliding-window RPM
+        deque) so a wide ThreadPoolExecutor can't blow past account caps.
+
+        Trace events use ``"kind": "openrouter"`` so the dashboard can
+        distinguish them from native OpenAI calls.
+        """
+        from openai import OpenAI
+
+        if model.startswith("openrouter/"):
+            model = model[len("openrouter/"):]
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OPENROUTER_API_KEY is not set; cannot call OpenRouter."
+            )
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+            timeout=timeout,
+        )
+        messages: list = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": user})
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        limiter = _openrouter_limiter()
+        limiter.wait_for_rpm_slot()
+        limiter.acquire_concurrency()
+        try:
+            t0 = time.time()
+            resp = client.chat.completions.create(**kwargs)
+        finally:
+            limiter.release_concurrency()
+            limiter.record_call()
+        _bump_cloud_calls()
+        latency = time.time() - t0
+        choice = resp.choices[0]
+        message = choice.message
+        text = message.content or ""
+        tool_calls = _serialize_openai_tool_calls(getattr(message, "tool_calls", None))
+        reasoning = getattr(message, "reasoning_content", None) or getattr(
+            message, "reasoning", None
+        )
+        u = resp.usage
+        p = getattr(u, "prompt_tokens", 0) if u else 0
+        c = getattr(u, "completion_tokens", 0) if u else 0
+        _record_event({
+            "kind": "openrouter",
+            "role": trace_role,
+            "model": model,
+            "system": system,
+            "user": user,
+            "response": text,
+            "tool_calls": tool_calls,
+            "reasoning_content": reasoning,
+            "tokens_in": p,
+            "tokens_out": c,
             "finish_reason": getattr(choice, "finish_reason", None),
             "latency_s": latency,
             "ts": time.time(),
@@ -688,6 +896,217 @@ class LocalCloudAgent(BaseAgent):
             })
         return last_text, p_total, c_total, n_searches_total, turns
 
+    @staticmethod
+    def _call_openai_agent(
+        model: str,
+        *,
+        user: str,
+        system: Optional[str] = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.0,
+        tools: Optional[list] = None,
+        max_turns: int = 8,
+        timeout: float = 600.0,
+        trace_role: str = "cloud",
+    ) -> Tuple[str, int, int, int, int]:
+        """OpenAI hosted-web-search call via the Responses API.
+
+        Returns ``(final_text, prompt_tokens_sum, completion_tokens_sum,
+        n_web_searches_sum, turns)`` — the same 5-tuple shape as
+        ``_call_anthropic_agent`` so callers can dispatch uniformly.
+
+        OpenAI's hosted web search is exposed only through the **Responses
+        API** (``client.responses.create``), not chat completions. The tool
+        is declared as ``{"type": "web_search"}``; older SDK/model combos
+        only accept the legacy ``"web_search_preview"`` name, so we retry
+        once with that on a tool-type rejection. The Responses API runs the
+        search server-side and returns the post-search answer in one call,
+        so ``turns`` is 1 — the ``max_turns`` arg is accepted only for
+        signature parity with ``_call_anthropic_agent``.
+
+        ``n_web_searches`` counts ``web_search_call`` items in the response
+        output. Token usage is summed from ``response.usage``
+        (``input_tokens`` / ``output_tokens``).
+        """
+        from openai import OpenAI
+
+        del max_turns  # Responses API resolves search server-side in one call.
+        client = OpenAI(timeout=timeout)
+
+        search_tool_names = ["web_search", "web_search_preview"]
+        kwargs_base: Dict[str, Any] = {
+            "model": model,
+            "input": user,
+            "max_output_tokens": max_tokens,
+        }
+        if system:
+            kwargs_base["instructions"] = system
+        # GPT-5 family ignores `temperature` on the Responses API (reasoning
+        # models reject it); only pass it for non-gpt-5 models.
+        if not is_gpt5_family(model):
+            kwargs_base["temperature"] = temperature
+
+        resp = None
+        last_exc: Optional[BaseException] = None
+        used_tool_name = search_tool_names[0]
+        t0 = time.time()
+        for tool_name in search_tool_names:
+            try:
+                resp = client.responses.create(
+                    **kwargs_base,
+                    tools=[{"type": tool_name}],
+                )
+                used_tool_name = tool_name
+                break
+            except Exception as exc:  # noqa: BLE001
+                # Only fall through to the legacy name on what looks like a
+                # tool-type rejection; re-raise anything else immediately.
+                last_exc = exc
+                msg = str(exc).lower()
+                if "web_search" in msg or "tool" in msg or "unsupported" in msg:
+                    continue
+                raise
+        if resp is None:
+            raise last_exc if last_exc is not None else RuntimeError(
+                "openai responses.create failed for all web_search tool names"
+            )
+        _bump_cloud_calls()
+        latency = time.time() - t0
+
+        # Extract output text. Prefer the SDK convenience accessor; fall back
+        # to walking the output items for `output_text` content parts.
+        text = ""
+        try:
+            text = resp.output_text or ""
+        except Exception:  # noqa: BLE001
+            text = ""
+        output_items = list(getattr(resp, "output", None) or [])
+        if not text:
+            chunks: List[str] = []
+            for item in output_items:
+                if getattr(item, "type", None) != "message":
+                    continue
+                for part in getattr(item, "content", None) or []:
+                    if getattr(part, "type", None) in ("output_text", "text"):
+                        chunks.append(getattr(part, "text", "") or "")
+            text = "".join(chunks)
+
+        n_searches = sum(
+            1 for item in output_items
+            if getattr(item, "type", None) in (
+                "web_search_call", "web_search_tool_call",
+            )
+        )
+        u = getattr(resp, "usage", None)
+        p = int(getattr(u, "input_tokens", 0) or 0) if u else 0
+        c = int(getattr(u, "output_tokens", 0) or 0) if u else 0
+        _record_event({
+            "kind": "openai_agent",
+            "role": trace_role,
+            "model": model,
+            "system": system,
+            "user": user,
+            "response": text,
+            "output_items": _jsonable(output_items),
+            "tokens_in": p,
+            "tokens_out": c,
+            "n_web_searches": n_searches,
+            "tools_declared": [{"type": used_tool_name}],
+            "stop_reason": getattr(resp, "status", None),
+            "latency_s": latency,
+            "ts": time.time(),
+        })
+        return text, p, c, n_searches, 1
+
+    @staticmethod
+    def _call_gemini_agent(
+        model: str,
+        *,
+        user: str,
+        system: Optional[str] = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.0,
+        tools: Optional[list] = None,
+        max_turns: int = 8,
+        timeout: float = 600.0,
+        trace_role: str = "cloud",
+    ) -> Tuple[str, int, int, int, int]:
+        """Gemini call grounded with Google Search.
+
+        Returns ``(final_text, prompt_tokens_sum, completion_tokens_sum,
+        n_web_searches_sum, turns)`` — same shape as ``_call_anthropic_agent``.
+
+        Grounding is wired by adding ``Tool(google_search=GoogleSearch())``
+        to the ``GenerateContentConfig``. Gemini resolves the grounding
+        server-side inside a single ``generate_content`` call, so
+        ``turns`` is always 1 and ``max_turns`` / ``tools`` are accepted
+        only for signature parity with ``_call_anthropic_agent``.
+
+        ``n_web_searches`` is derived from ``candidates[0].grounding_metadata``
+        — we count the ``web_search_queries`` Gemini reports, falling back to
+        0 when no grounding metadata is present (the model answered without
+        searching).
+        """
+        from google import genai
+        from google.genai import types
+
+        del tools, max_turns  # grounding is config-level + single-call.
+        client = genai.Client(
+            http_options=types.HttpOptions(timeout=int(timeout * 1000))
+        )
+        cfg = types.GenerateContentConfig(
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+        )
+        if system:
+            cfg.system_instruction = system
+        t0 = time.time()
+        resp = client.models.generate_content(
+            model=model,
+            contents=user,
+            config=cfg,
+        )
+        _bump_cloud_calls()
+        latency = time.time() - t0
+        text = (resp.text or "") if hasattr(resp, "text") else ""
+        um = getattr(resp, "usage_metadata", None)
+        p = int(getattr(um, "prompt_token_count", 0) or 0) if um else 0
+        c = int(getattr(um, "candidates_token_count", 0) or 0) if um else 0
+
+        # Derive search count from grounding metadata when present.
+        n_searches = 0
+        web_search_queries: List[str] = []
+        finish_reason = None
+        try:
+            cand0 = resp.candidates[0]
+            finish_reason = str(getattr(cand0, "finish_reason", None))
+            gm = getattr(cand0, "grounding_metadata", None)
+            if gm is not None:
+                queries = getattr(gm, "web_search_queries", None) or []
+                web_search_queries = [str(q) for q in queries]
+                n_searches = len(web_search_queries)
+        except Exception:  # noqa: BLE001
+            pass
+        _record_event({
+            "kind": "gemini_agent",
+            "role": trace_role,
+            "model": model,
+            "system": system,
+            "user": user,
+            "response": text,
+            "tokens_in": p,
+            "tokens_out": c,
+            "n_web_searches": n_searches,
+            "web_search_queries": web_search_queries,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "finish_reason": finish_reason,
+            "latency_s": latency,
+            "ts": time.time(),
+        })
+        return text, p, c, n_searches, 1
+
     def _call_cloud(
         self,
         *,
@@ -899,8 +1318,10 @@ class LocalCloudAgent(BaseAgent):
 
 __all__ = [
     "ANTHROPIC_WEB_SEARCH_TOOL",
+    "GEMINI_SEARCH_COST_PER_CALL",
     "LocalCloudAgent",
     "NO_TEMP_PREFIXES",
+    "OPENAI_WEB_SEARCH_COST_PER_CALL",
     "WEB_SEARCH_COST_PER_CALL",
     "_bump_cloud_calls",
     "_bump_local_calls",

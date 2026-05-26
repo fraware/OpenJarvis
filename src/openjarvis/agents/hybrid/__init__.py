@@ -6,7 +6,7 @@ Each module here registers one agent under ``@AgentRegistry.register("<name>")``
     conductor         — zero-shot planner emits a DAG of up to 5 worker calls
     minions           — supervisor (cloud) ↔ worker (local) reactive loop
     archon            — layered (generator → ranker → fuser) inference-time search
-    skillorchestra    — skill-aware router picks one agent from a pool
+    skillorchestra    — eval orchestrator: skill-routed search→reasoning→answer loop
     toolorchestra     — prompted multi-turn dispatcher over a mixed tool/model pool
 
 All agents share :class:`LocalCloudAgent` as the base. They are bench-agnostic:
@@ -36,6 +36,7 @@ for _modname in (
     "toolorchestra",
     "mini_swe_agent",
     "baseline_cloud",
+    "baseline_local",
 ):
     try:
         __import__(f"openjarvis.agents.hybrid.{_modname}")
