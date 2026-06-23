@@ -35,3 +35,5 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm run build
+        env:
+          VITE_SUPABASE_ANON_KEY: test-anon-key
