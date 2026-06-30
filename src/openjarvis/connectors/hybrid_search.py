@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # numpy imported lazily inside _vector_recall (see embeddings.py) so importing
@@ -30,6 +31,54 @@ from openjarvis.connectors.embeddings import OllamaEmbedder, decode_embedding
 from openjarvis.connectors.store import KnowledgeStore
 
 logger = logging.getLogger(__name__)
+
+
+_UPCOMING_TERMS = {
+    "next",
+    "upcoming",
+    "future",
+    "forthcoming",
+    "coming",
+    "soon",
+}
+_CALENDAR_TERMS = {
+    "calendar",
+    "calendars",
+    "event",
+    "events",
+}
+_GCALENDAR_GENERIC_TERMS = _UPCOMING_TERMS | _CALENDAR_TERMS | {
+    "appointment",
+    "appointments",
+    "meeting",
+    "meetings",
+    "schedule",
+}
+_QUERY_STOPWORDS = {
+    "a",
+    "all",
+    "am",
+    "are",
+    "do",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "list",
+    "me",
+    "my",
+    "on",
+    "s",
+    "show",
+    "tell",
+    "the",
+    "there",
+    "to",
+    "what",
+    "whats",
+    "when",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +167,41 @@ def _snippet(content: str, max_chars: int = 500) -> str:
     if len(flat) <= max_chars:
         return flat
     return flat[:max_chars].rstrip() + "…"
+
+
+def _query_tokens(query: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9_]+", query.lower()))
+
+
+def _sources_include_gcalendar(sources: Optional[Sequence[str]]) -> bool:
+    return any(str(source).lower() == "gcalendar" for source in sources or [])
+
+
+def _has_upcoming_calendar_intent(
+    query: str,
+    sources: Optional[Sequence[str]],
+) -> bool:
+    tokens = _query_tokens(query)
+    if not tokens or not (tokens & _UPCOMING_TERMS):
+        return False
+    if _sources_include_gcalendar(sources):
+        return True
+    return bool(tokens & _CALENDAR_TERMS)
+
+
+def _is_generic_calendar_timeline_query(query: str) -> bool:
+    tokens = _query_tokens(query)
+    if not tokens:
+        return True
+    topic_tokens = tokens - _GCALENDAR_GENERIC_TERMS - _QUERY_STOPWORDS
+    return not topic_tokens
+
+
+def _start_is_nowish_or_future(start: Optional[datetime]) -> bool:
+    if start is None:
+        return False
+    now = datetime.now(tz=start.tzinfo) if start.tzinfo else datetime.now()
+    return start >= now - timedelta(days=1)
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +461,48 @@ class HybridSearch:
             for r in rows
         ]
 
+    def _normalise_calendar_timeline_scope(
+        self,
+        query: str,
+        time_range: Optional[Tuple[Optional[datetime], Optional[datetime]]],
+        sources: Optional[Sequence[str]],
+    ) -> Tuple[
+        Optional[Tuple[Optional[datetime], Optional[datetime]]],
+        Optional[Sequence[str]],
+        bool,
+        bool,
+    ]:
+        """Fill in structured filters for generic upcoming-calendar requests.
+
+        Queries like "what are my next calendar events?" often have no useful
+        lexical terms in the stored event text, so BM25/vector ranking can miss
+        nearby events. Treat that shape as a source-filtered timeline request.
+        """
+        scoped_sources = list(sources) if sources else None
+        has_upcoming_intent = _has_upcoming_calendar_intent(query, scoped_sources)
+
+        if has_upcoming_intent and not scoped_sources:
+            scoped_sources = ["gcalendar"]
+
+        if not _sources_include_gcalendar(scoped_sources):
+            return time_range, scoped_sources, False, False
+
+        if has_upcoming_intent:
+            if time_range is None:
+                time_range = (datetime.now(), None)
+            else:
+                start, end = time_range
+                if start is None:
+                    time_range = (datetime.now(), end)
+
+        chronological = has_upcoming_intent or (
+            time_range is not None
+            and time_range[1] is None
+            and _start_is_nowish_or_future(time_range[0])
+        )
+        metadata_only = chronological and _is_generic_calendar_timeline_query(query)
+        return time_range, scoped_sources, chronological, metadata_only
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -396,9 +522,14 @@ class HybridSearch:
         when callers want a pure metadata filter (e.g. "all mail from X in
         May") — in that case only the vector leg runs (and only if an
         embedder is configured); if neither leg yields anything the
-        structured filter is applied directly and the most recent rows are
-        returned.
+        structured filter is applied directly. Upcoming calendar timelines are
+        returned nearest-first; other fallbacks return the most recent rows.
         """
+        time_range, sources, chronological_order, metadata_only = (
+            self._normalise_calendar_timeline_scope(query, time_range, sources)
+        )
+        rank_query = "" if metadata_only else query
+
         bm25_filter_sql, bm25_filter_params = self._build_filters(
             person=person, time_range=time_range, sources=sources, alias="kc"
         )
@@ -407,25 +538,35 @@ class HybridSearch:
         )
 
         bm25 = (
-            self._bm25_recall(query, bm25_filter_sql, bm25_filter_params)
-            if query.strip()
+            self._bm25_recall(rank_query, bm25_filter_sql, bm25_filter_params)
+            if rank_query.strip()
             else []
         )
         vector = (
-            self._vector_recall(query, unaliased_filter_sql, unaliased_filter_params)
-            if query.strip()
+            self._vector_recall(
+                rank_query,
+                unaliased_filter_sql,
+                unaliased_filter_params,
+            )
+            if rank_query.strip()
             else []
         )
         fused = self._fuse(bm25, vector)
 
         # Metadata-only fallback: empty query, or both legs produced nothing
-        # despite a non-empty query. Return the most recent rows matching the
-        # filter so the agent still gets a useful corpus snapshot.
+        # despite a non-empty query. Calendar timeline requests use start-time
+        # ascending; other searches use recency so the agent still gets a
+        # useful corpus snapshot.
         if not fused:
+            order_by = (
+                "timestamp ASC, created_at ASC"
+                if chronological_order
+                else "timestamp DESC, created_at DESC"
+            )
             sql = f"""
                 SELECT id FROM knowledge_chunks
                 WHERE {unaliased_filter_sql}
-                ORDER BY timestamp DESC, created_at DESC
+                ORDER BY {order_by}
                 LIMIT ?
             """
             rows = self._store._conn.execute(
