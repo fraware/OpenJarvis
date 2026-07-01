@@ -460,21 +460,9 @@ guarded = GuardrailsEngine(
 
 ---
 
-## Privacy and data-boundary diagnostics
+## Data boundary scan
 
-OpenJarvis provides three complementary security layers:
-
-1. **Host scan** — `jarvis scan` (without flags) checks OS posture: disk encryption,
-   cloud-sync agents, remote-access tools, and exposed engine ports.
-2. **Config scan** — `jarvis scan --data-boundaries` audits application configuration,
-   environment-variable presence, and known local runtime stores without reading
-   private file contents. Use `--strict` in CI to fail on warn/fail findings.
-3. **BoundaryGuard** — runtime guardrails (`GuardrailsEngine`, scanners, file policy)
-   that redact or block secrets, PII, and sensitive paths during inference.
-
-The host and config scans are offline diagnostics. BoundaryGuard enforces policy
-during live agent runs. See [Data Boundary Scan](data-boundary-scan.md) for the
-full config-scan reference.
+See [Data Boundary Scan](data-boundary-scan.md) for the application config diagnostic (`jarvis scan --data-boundaries`).
 
 ---
 
