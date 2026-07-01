@@ -226,6 +226,41 @@ def test_top_level_cli_registers_data_boundary_scan(monkeypatch, tmp_path):
     assert "summary" in payload
 
 
+
+
+def test_top_level_scan_data_boundaries_does_not_check_for_updates(
+    monkeypatch,
+    tmp_path,
+):
+    import sys
+
+    from openjarvis.cli import cli
+    from openjarvis.core.config import JarvisConfig
+
+    called = {"value": False}
+
+    def fake_check_for_updates(_subcommand):
+        called["value"] = True
+
+    monkeypatch.setattr(
+        "openjarvis.cli._version_check.check_for_updates",
+        fake_check_for_updates,
+    )
+    monkeypatch.setattr(
+        "openjarvis.cli.scan_cmd._load_data_boundary_config",
+        lambda: (JarvisConfig(), tmp_path, False, "", ""),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["jarvis", "scan", "--data-boundaries", "--json"],
+    )
+
+    result = CliRunner().invoke(cli, ["scan", "--data-boundaries", "--json"])
+
+    assert result.exit_code == 0
+    assert called["value"] is False
+
 def test_update_check_skip_helper_is_precise():
     from click import Command, Context
 
