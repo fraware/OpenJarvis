@@ -180,17 +180,46 @@ BROWSER_TOOLS = {
     "browser_type",
     "web_browser",
 }
+GENERIC_NETWORK_TOOLS = {"http_request"}
+CHANNEL_OUTBOUND_TOOLS = {"channel_send"}
+CLOUD_MEDIA_TOOLS = {"audio_transcribe", "image_generate"}
+OUTBOUND_TOOL_SURFACES = (
+    WEB_SEARCH_TOOLS
+    | BROWSER_TOOLS
+    | GENERIC_NETWORK_TOOLS
+    | CHANNEL_OUTBOUND_TOOLS
+    | CLOUD_MEDIA_TOOLS
+)
 LOCAL_ACCESS_TOOLS = {
     "apply_patch",
+    "channel_list",
+    "channel_status",
     "code_interpreter",
+    "code_interpreter_docker",
     "db_query",
     "docker_shell_exec",
     "file_read",
     "file_write",
+    "git_commit",
+    "git_diff",
+    "git_log",
+    "git_status",
+    "kg_add_entity",
+    "kg_add_relation",
+    "kg_neighbors",
+    "kg_query",
     "knowledge_sql",
+    "memory_index",
     "memory_manage",
+    "memory_retrieve",
+    "memory_search",
+    "memory_store",
+    "pdf_extract",
     "repl",
+    "retrieval",
     "shell_exec",
+    "skill_manage",
+    "user_profile_manage",
 }
 
 
@@ -783,6 +812,55 @@ def _audit_tool_surfaces(config: Any, builder: _FindingBuilder) -> None:
             ),
         )
 
+    if tools & GENERIC_NETWORK_TOOLS:
+        builder.add(
+            finding_id="generic-network-tool-configured",
+            status="warn",
+            title="Generic HTTP/network tool is configured",
+            potential_data_path=("HTTP arguments, headers, and body -> external URL"),
+            evidence=(
+                f"configured tool(s) = {_format_tools(tools & GENERIC_NETWORK_TOOLS)}"
+            ),
+            recommendation=(
+                "Review request destinations and payloads before using HTTP tools with "
+                "sensitive data."
+            ),
+        )
+
+    if tools & CHANNEL_OUTBOUND_TOOLS:
+        builder.add(
+            finding_id="channel-outbound-tool-configured",
+            status="warn",
+            title="Channel outbound messaging tool is configured",
+            potential_data_path="message content -> external messaging channel",
+            evidence=(
+                f"configured tool(s) = {_format_tools(tools & CHANNEL_OUTBOUND_TOOLS)}"
+            ),
+            recommendation=(
+                "Review channel targets and message content before enabling outbound "
+                "messaging tools."
+            ),
+        )
+
+    cloud_media = tools & CLOUD_MEDIA_TOOLS
+    if cloud_media:
+        path_parts: list[str] = []
+        if "image_generate" in cloud_media:
+            path_parts.append("image prompt -> external media provider")
+        if "audio_transcribe" in cloud_media:
+            path_parts.append("local audio file -> external media provider")
+        builder.add(
+            finding_id="cloud-media-tool-configured",
+            status="warn",
+            title="Cloud media generation or transcription tool is configured",
+            potential_data_path="; ".join(path_parts),
+            evidence=f"configured tool(s) = {_format_tools(cloud_media)}",
+            recommendation=(
+                "Review prompts and local media files before sending them to external "
+                "media providers."
+            ),
+        )
+
     local_access = tools & LOCAL_ACCESS_TOOLS
     if local_access:
         builder.add(
@@ -1201,7 +1279,7 @@ def _audit_speech_settings(config: Any, builder: _FindingBuilder) -> None:
 def _has_cloud_or_api_surface(config: Any | None, active_tools: set[str]) -> bool:
     if any(os.environ.get(name) for name in API_KEY_ENV_VARS):
         return True
-    if active_tools & WEB_SEARCH_TOOLS:
+    if active_tools & OUTBOUND_TOOL_SURFACES:
         return True
     if config is None:
         return False
