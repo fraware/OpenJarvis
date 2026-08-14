@@ -6,12 +6,19 @@ import pytest
 
 from openjarvis.core.config import JarvisConfig, load_config
 from openjarvis.security.data_boundary_audit import (
+    API_KEY_ENV_VARS,
     BROWSER_TOOLS,
     CHANNEL_OUTBOUND_TOOLS,
+    CHANNEL_REFERENCE_ENV_VARS,
+    CHANNEL_SECRET_ENV_VARS,
     CLOUD_MEDIA_TOOLS,
+    EXTERNAL_TOOL_SURFACES,
+    GENERIC_CREDENTIAL_ENV_VARS,
     GENERIC_NETWORK_TOOLS,
+    KNOWLEDGE_ENGINE_TOOLS,
     LOCAL_ACCESS_TOOLS,
     OUTBOUND_TOOL_SURFACES,
+    RUNTIME_CREDENTIAL_ENV_KEYS,
     WEB_SEARCH_TOOLS,
     build_data_boundary_report,
 )
@@ -28,6 +35,7 @@ EXPECTED_BROWSER_TOOLS = {
 EXPECTED_GENERIC_NETWORK_TOOLS = {"http_request"}
 EXPECTED_CHANNEL_OUTBOUND_TOOLS = {"channel_send"}
 EXPECTED_CLOUD_MEDIA_TOOLS = {"audio_transcribe", "image_generate"}
+EXPECTED_KNOWLEDGE_ENGINE_TOOLS = {"scan_chunks"}
 
 EXPECTED_LOCAL_ACCESS_TOOLS = {
     "file_write",
@@ -76,6 +84,7 @@ CLASSIFIED_TOOLS = (
     | GENERIC_NETWORK_TOOLS
     | CHANNEL_OUTBOUND_TOOLS
     | CLOUD_MEDIA_TOOLS
+    | KNOWLEDGE_ENGINE_TOOLS
     | LOCAL_ACCESS_TOOLS
 )
 
@@ -96,6 +105,7 @@ def _low_noise_config():
     config.telemetry.enabled = False
     config.agent.context_from_memory = False
     config.agent.tools = ""
+    config.agent.default_agent = "simple"
     config.skills.enabled = False
     config.digest.enabled = False
     config.channel.enabled = False
@@ -103,13 +113,21 @@ def _low_noise_config():
     config.learning.training_enabled = False
     config.learning.auto_update = False
     config.learning.spec_search.enabled = False
+    config.learning.spec_search.teacher_engine = ""
     config.tools.enabled = ""
     config.tools.mcp.enabled = False
     config.tools.storage.enabled = False
     config.optimize.optimizer_provider = ""
     config.optimize.judge_model = ""
     config.server.host = "127.0.0.1"
+    config.server.model = ""
     config.security.profile = "personal"
+    config.intelligence.provider = ""
+    config.intelligence.preferred_engine = ""
+    config.intelligence.default_model = ""
+    config.engine.default = "ollama"
+    config.deep_research.engine = ""
+    config.deep_research.model = ""
     # Avoid scanning the developer's real ~/.openjarvis store files.
     config.traces.db_path = ""
     config.telemetry.db_path = ""
@@ -641,12 +659,15 @@ def test_required_registered_tool_names_are_classified():
     assert EXPECTED_GENERIC_NETWORK_TOOLS <= GENERIC_NETWORK_TOOLS
     assert EXPECTED_CHANNEL_OUTBOUND_TOOLS <= CHANNEL_OUTBOUND_TOOLS
     assert EXPECTED_CLOUD_MEDIA_TOOLS <= CLOUD_MEDIA_TOOLS
+    assert EXPECTED_KNOWLEDGE_ENGINE_TOOLS <= KNOWLEDGE_ENGINE_TOOLS
     assert (
         EXPECTED_GENERIC_NETWORK_TOOLS
         | EXPECTED_CHANNEL_OUTBOUND_TOOLS
         | EXPECTED_CLOUD_MEDIA_TOOLS
         | EXPECTED_BROWSER_TOOLS
+        | EXPECTED_KNOWLEDGE_ENGINE_TOOLS
     ) <= OUTBOUND_TOOL_SURFACES
+    assert EXPECTED_KNOWLEDGE_ENGINE_TOOLS <= EXTERNAL_TOOL_SURFACES
 
 
 def test_builtin_registry_tools_are_classified_or_explicitly_exempt():
@@ -767,13 +788,28 @@ def test_http_request_with_local_tool_bypass_warns(tmp_path):
 @pytest.mark.parametrize(
     "tool_name",
     sorted(
-        EXPECTED_BROWSER_TOOLS
-        | EXPECTED_GENERIC_NETWORK_TOOLS
+        EXPECTED_GENERIC_NETWORK_TOOLS
         | EXPECTED_CHANNEL_OUTBOUND_TOOLS
         | EXPECTED_CLOUD_MEDIA_TOOLS
+        | EXPECTED_BROWSER_TOOLS
     ),
 )
-def test_outbound_tools_emit_frontend_scope_note(tmp_path, tool_name):
+def test_outbound_tools_with_bypass_are_external_surfaces(tmp_path, tool_name):
+    config = _low_noise_config()
+    config.tools.enabled = tool_name
+    config.security.local_tool_bypass = True
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert findings["security-local-tool-bypass-enabled"].status == "warn"
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    sorted(EXPECTED_CLOUD_MEDIA_TOOLS | {"web_search"}),
+)
+def test_cloud_api_outbound_tools_emit_frontend_scope_note(tmp_path, tool_name):
     config = _low_noise_config()
     config.tools.enabled = tool_name
 
@@ -906,3 +942,297 @@ enabled = false
     assert findings["telemetry-enabled"].status == "warn"
     assert "traces-enabled" not in findings
     assert findings["memory-context-injection-enabled"].status == "info"
+
+
+def test_scan_chunks_is_classified():
+    assert "scan_chunks" in KNOWLEDGE_ENGINE_TOOLS
+    assert "scan_chunks" in CLASSIFIED_TOOLS
+    assert "scan_chunks" in EXPECTED_BUILTIN_TOOLS
+
+
+def test_scan_chunks_local_engine_is_warn_or_info(tmp_path):
+    config = _low_noise_config()
+    config.tools.enabled = "scan_chunks"
+    config.engine.default = "ollama"
+    config.deep_research.engine = ""
+    config.deep_research.model = ""
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert "knowledge-chunks-to-cloud-risk" not in findings
+    finding = findings["knowledge-engine-tool-configured"]
+    assert finding.status in {"warn", "info"}
+    assert "local knowledge-store chunks" in finding.potential_data_path
+
+
+def test_knowledge_chunks_cloud_composition_is_fail(tmp_path):
+    config = _low_noise_config()
+    config.tools.enabled = "scan_chunks"
+    config.engine.default = "openai"
+    (tmp_path / "knowledge.db").write_text("", encoding="utf-8")
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    findings = {finding.id: finding for finding in report.findings}
+    finding = findings["knowledge-chunks-to-cloud-risk"]
+    assert finding.status == "fail"
+    assert "knowledge.db chunks" in finding.potential_data_path
+    assert "cloud inference" in finding.potential_data_path
+    assert report.verdict == "local knowledge may be sent to cloud inference"
+
+
+def test_knowledge_chunks_local_composition_is_not_fail(tmp_path):
+    config = _low_noise_config()
+    config.tools.enabled = "scan_chunks"
+    config.engine.default = "ollama"
+    config.intelligence.default_model = "qwen3.5:9b"
+    (tmp_path / "knowledge.db").write_text("", encoding="utf-8")
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert "knowledge-chunks-to-cloud-risk" not in findings
+    assert findings["knowledge-engine-tool-configured"].status in {"warn", "info"}
+    assert findings["local-store-knowledge-db"].status == "warn"
+
+
+def test_knowledge_db_is_reported(tmp_path):
+    config = _low_noise_config()
+    (tmp_path / "knowledge.db").write_text("", encoding="utf-8")
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert findings["local-store-knowledge-db"].status == "warn"
+    assert (
+        "Knowledge and Deep Research database"
+        in findings["local-store-knowledge-db"].title
+    )
+
+
+def test_knowledge_db_path_is_redacted(tmp_path):
+    config = _low_noise_config()
+    (tmp_path / "knowledge.db").write_text("", encoding="utf-8")
+
+    report = build_data_boundary_report(config, tmp_path)
+    payload = report.to_dict()
+    payload_with_paths = report.to_dict(show_paths=True)
+
+    assert str(tmp_path) not in str(payload)
+    assert "knowledge.db" in str(payload)
+    assert "knowledge.db" in str(payload_with_paths)
+
+
+def test_knowledge_db_posix_permissions_checked(tmp_path):
+    if os.name == "nt":
+        pytest.skip("Unix permission bits are not checked on Windows")
+
+    config = _low_noise_config()
+    knowledge_db = tmp_path / "knowledge.db"
+    knowledge_db.write_text("", encoding="utf-8")
+    knowledge_db.chmod(0o644)
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert findings["local-store-permissions-knowledge-db"].status == "warn"
+
+
+def test_browser_resolver_tools_are_all_classified():
+    from openjarvis.agents.tool_resolver import BROWSER_SUB_TOOLS
+
+    assert set(BROWSER_SUB_TOOLS) <= BROWSER_TOOLS
+
+
+def test_browser_axtree_is_warn(tmp_path):
+    config = _low_noise_config()
+    config.tools.enabled = "browser_axtree"
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert findings["browser-tool-configured"].status == "warn"
+    assert "browser_axtree" in findings["browser-tool-configured"].evidence
+
+
+def test_credentials_toml_is_reported_without_reading_contents(tmp_path):
+    config = _low_noise_config()
+    creds = tmp_path / "credentials.toml"
+    creds.write_text(
+        'openai = { OPENAI_API_KEY = "super-secret-value" }\n', encoding="utf-8"
+    )
+
+    report = build_data_boundary_report(config, tmp_path)
+    payload = report.to_dict(show_paths=True)
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert findings["local-store-credentials-toml"].status == "warn"
+    assert "super-secret-value" not in str(payload)
+    assert "OPENAI_API_KEY" not in findings["local-store-credentials-toml"].evidence
+
+
+def test_credentials_toml_path_redacted(tmp_path):
+    config = _low_noise_config()
+    (tmp_path / "credentials.toml").write_text("", encoding="utf-8")
+
+    report = build_data_boundary_report(config, tmp_path)
+    payload = report.to_dict()
+
+    assert str(tmp_path) not in str(payload)
+    assert "credentials.toml" in str(payload)
+
+
+def test_credentials_toml_permission_warning(tmp_path):
+    if os.name == "nt":
+        pytest.skip("Unix permission bits are not checked on Windows")
+
+    config = _low_noise_config()
+    creds = tmp_path / "credentials.toml"
+    creds.write_text("", encoding="utf-8")
+    creds.chmod(0o644)
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert findings["local-store-permissions-credentials-toml"].status == "warn"
+
+
+def test_runtime_credential_keys_are_all_covered():
+    specialized = (
+        set(API_KEY_ENV_VARS)
+        | set(CHANNEL_SECRET_ENV_VARS)
+        | set(CHANNEL_REFERENCE_ENV_VARS)
+    )
+    assert RUNTIME_CREDENTIAL_ENV_KEYS <= specialized | set(GENERIC_CREDENTIAL_ENV_VARS)
+
+
+def test_runtime_credential_values_never_appear(tmp_path, monkeypatch):
+    config = _low_noise_config()
+    secret = "runtime-credential-secret-value-xyz"
+    # Cover both specialized and generic keys.
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    monkeypatch.setenv("ZULIP_API_KEY", secret)
+    monkeypatch.setenv("LINE_CHANNEL_SECRET", secret)
+
+    report = build_data_boundary_report(config, tmp_path)
+    payload = report.to_dict(show_paths=True)
+    blob = str(payload)
+
+    assert secret not in blob
+    findings = {finding.id: finding for finding in report.findings}
+    assert "OPENAI_API_KEY is set" in findings["env-credential-openai_api_key"].evidence
+    assert (
+        "ZULIP_API_KEY is set"
+        in findings["env-credential-generic-zulip_api_key"].evidence
+    )
+    assert (
+        "LINE_CHANNEL_SECRET is set"
+        in findings["env-credential-generic-line_channel_secret"].evidence
+    )
+
+
+def _clear_cloud_api_env(monkeypatch) -> None:
+    for name in API_KEY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_external_surface_does_not_claim_cloud_inference_without_cloud(
+    tmp_path,
+    monkeypatch,
+):
+    _clear_cloud_api_env(monkeypatch)
+    config = _low_noise_config()
+    config.tools.enabled = "browser_navigate"
+    config.security.local_tool_bypass = True
+
+    report = build_data_boundary_report(config, tmp_path)
+    payload = report.to_dict(show_paths=True)
+    blob = str(payload).lower()
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert findings["browser-tool-configured"].status == "warn"
+    assert findings["security-local-tool-bypass-enabled"].status == "warn"
+    assert "frontend-credential-storage-not-inspected" not in findings
+    assert "cloud inference" not in blob
+
+
+def test_browser_only_does_not_emit_cloud_api_key_claim(tmp_path, monkeypatch):
+    _clear_cloud_api_env(monkeypatch)
+    config = _low_noise_config()
+    config.tools.enabled = "browser_axtree"
+
+    report = build_data_boundary_report(config, tmp_path)
+    payload = report.to_dict(show_paths=True)
+
+    assert "frontend-credential-storage-not-inspected" not in _ids(report)
+    assert "cloud API keys" not in str(payload)
+
+
+def test_full_system_access_config_snapshot(tmp_path, monkeypatch):
+    _clear_cloud_api_env(monkeypatch)
+    profile = """
+[engine]
+default = "ollama"
+
+[intelligence]
+default_model = "qwen3.5:9b"
+
+[agent]
+default_agent = "orchestrator"
+max_turns = 10
+
+[tools]
+enabled = [
+    "shell_exec",
+    "file_read",
+    "file_write",
+    "apply_patch",
+    "code_interpreter",
+    "git_status",
+    "git_diff",
+    "think",
+    "calculator",
+]
+"""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(profile, encoding="utf-8")
+    config = load_config(config_path)
+    # Mirror _low_noise_config store-path clearing so real home files are ignored.
+    config.traces.db_path = ""
+    config.telemetry.db_path = ""
+    config.security.audit_log_path = ""
+    config.security.vault_key_path = ""
+    config.tools.storage.db_path = ""
+    config.tools.storage.facts_path = ""
+    config.sessions.db_path = ""
+    config.agent_manager.db_path = ""
+    config.optimize.db_path = ""
+    config.optimize.optimizer_provider = ""
+    config.optimize.judge_model = ""
+    config.scheduler.db_path = ""
+    config.skills.index_dir = ""
+    config.analytics.enabled = False
+    config.traces.enabled = False
+    config.telemetry.enabled = False
+    config.agent.context_from_memory = False
+    config.skills.enabled = False
+    config.digest.enabled = False
+    config.channel.enabled = False
+    config.server.host = "127.0.0.1"
+    config.security.profile = "personal"
+    config.learning.spec_search.enabled = False
+    config.learning.enabled = False
+    config.learning.training_enabled = False
+    config.learning.auto_update = False
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert findings["local-access-tools-configured"].status == "info"
+    assert "shell_exec" in findings["local-access-tools-configured"].evidence
+    assert "file_read" in findings["local-access-tools-configured"].evidence
+    assert "knowledge-chunks-to-cloud-risk" not in findings
+    assert "cloud-provider-configured" not in findings
+    assert "frontend-credential-storage-not-inspected" not in findings
+    assert report.verdict == "no fail or warn findings detected"

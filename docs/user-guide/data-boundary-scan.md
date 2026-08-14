@@ -49,19 +49,24 @@ The current checks cover:
 - deep research engine and model settings
 - security bypass flags when cloud inference is configured
 - unset `security.profile` (informational)
-- web search, browser, local file, shell, code, and MCP tool surfaces
+- web search, browser, local file, shell, code, knowledge chunk scanning, and MCP tool surfaces
+- local knowledge.db composition with cloud-capable Deep Research targets
 - server binding and unauthenticated A2A exposure
 - channel enablement, channel credential fields, and channel credential env vars
 - skills, skill auto-sync, digest sources, and cloud speech backends
-- local stores such as `memory.db`, `traces.db`, `telemetry.db`, `scheduler.db`,
-  embeddings, skill index, `.vault_key`, and memory files
+- local stores such as `knowledge.db`, `credentials.toml`, `memory.db`, `traces.db`,
+  `telemetry.db`, `scheduler.db`, embeddings, skill index, `.vault_key`, and memory files
 - connector credential files under `connectors/*.json`, without reading them
-- API-key environment variables such as `OPENAI_API_KEY` and `TAVILY_API_KEY`
+- API-key and other runtime credential environment variables (presence only)
 - a scope note for frontend credential storage when cloud/API-key surfaces exist
 
 Configured database paths (for example `traces.db_path` or `memory.db_path`)
 are resolved from config when set, not only the default locations under the
 OpenJarvis home directory.
+
+Static Deep Research targeting uses configuration only (no request overrides):
+`deep_research.engine` or `engine.default`, and `deep_research.model` or
+`server.model` or `intelligence.default_model`.
 
 ## Status levels
 

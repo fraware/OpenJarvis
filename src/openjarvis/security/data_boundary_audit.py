@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
+from openjarvis.core.credentials import TOOL_CREDENTIALS
+
 Status = Literal["fail", "warn", "info"]
 
 CLOUD_PROVIDER_KEYS = {
@@ -115,8 +117,26 @@ CHANNEL_REFERENCE_ENV_VARS = {
     "WHATSAPP_PHONE_NUMBER_ID": "WhatsApp channel",
 }
 
+# Runtime tool/channel credential env keys from credentials.toml schema.
+RUNTIME_CREDENTIAL_ENV_KEYS = {
+    key for keys in TOOL_CREDENTIALS.values() for key in keys
+}
+
+# Specialized findings carry provider/channel semantics; remaining keys get a
+# presence-only generic finding. Values are never read or printed.
+_SPECIALIZED_CREDENTIAL_ENV_VARS = (
+    set(API_KEY_ENV_VARS)
+    | set(CHANNEL_SECRET_ENV_VARS)
+    | set(CHANNEL_REFERENCE_ENV_VARS)
+)
+GENERIC_CREDENTIAL_ENV_VARS = frozenset(
+    RUNTIME_CREDENTIAL_ENV_KEYS - _SPECIALIZED_CREDENTIAL_ENV_VARS
+)
+
 LOCAL_STORE_CANDIDATES: tuple[tuple[str, str, str, Status], ...] = (
     ("config-file", "Configuration file", "config.toml", "info"),
+    ("credentials-toml", "Credentials file", "credentials.toml", "warn"),
+    ("knowledge-db", "Knowledge and Deep Research database", "knowledge.db", "warn"),
     ("memory-db", "Memory index database", "memory.db", "warn"),
     ("memory-facts", "Persistent memory facts", "memory_facts.jsonl", "warn"),
     ("traces-db", "Trace database", "traces.db", "warn"),
@@ -171,6 +191,7 @@ PERSONAL_DIGEST_SOURCES = {
 WEB_SEARCH_TOOLS = {"web_search", "search", "tavily_search"}
 BROWSER_TOOLS = {
     "browser",
+    "browser_axtree",
     "browser_click",
     "browser_extract",
     "browser_navigate",
@@ -183,13 +204,20 @@ BROWSER_TOOLS = {
 GENERIC_NETWORK_TOOLS = {"http_request"}
 CHANNEL_OUTBOUND_TOOLS = {"channel_send"}
 CLOUD_MEDIA_TOOLS = {"audio_transcribe", "image_generate"}
-OUTBOUND_TOOL_SURFACES = (
+# Local knowledge chunks scanned by an inference engine (Deep Research path).
+KNOWLEDGE_ENGINE_TOOLS = {"scan_chunks"}
+# External egress surfaces (web, browser, HTTP, channels, media, knowledge LM).
+EXTERNAL_TOOL_SURFACES = (
     WEB_SEARCH_TOOLS
     | BROWSER_TOOLS
     | GENERIC_NETWORK_TOOLS
     | CHANNEL_OUTBOUND_TOOLS
     | CLOUD_MEDIA_TOOLS
+    | KNOWLEDGE_ENGINE_TOOLS
 )
+# Narrower cloud inference / media API key surfaces (not browser-only egress).
+CLOUD_API_SURFACES = CLOUD_MEDIA_TOOLS | WEB_SEARCH_TOOLS
+OUTBOUND_TOOL_SURFACES = EXTERNAL_TOOL_SURFACES
 LOCAL_ACCESS_TOOLS = {
     "apply_patch",
     "channel_list",
@@ -411,7 +439,7 @@ def build_data_boundary_report(
         _audit_security_settings(
             active_config,
             builder,
-            has_cloud_surface=_has_cloud_or_api_surface(active_config, active_tools),
+            has_external_surface=_has_external_surface(active_config, active_tools),
         )
 
     if root_path is not None:
@@ -419,13 +447,15 @@ def build_data_boundary_report(
         _audit_connector_credentials(root_path, builder)
         if active_config is not None:
             _audit_local_channel_credential_dirs(active_config, root_path, builder)
+            _audit_knowledge_cloud_composition(active_config, root_path, builder)
     _audit_environment_credentials(
         active_config,
         builder,
         active_tools=active_tools,
     )
     _audit_channel_environment_credentials(active_config, builder)
-    if _has_cloud_or_api_surface(active_config, active_tools):
+    _audit_generic_runtime_credentials(builder)
+    if _has_cloud_api_surface(active_config, active_tools):
         _audit_frontend_storage_scope(builder)
 
     findings = builder.build()
@@ -599,11 +629,127 @@ def _audit_deep_research_settings(config: Any, builder: _FindingBuilder) -> None
     )
 
 
+def _effective_deep_research_target(config: Any) -> tuple[str, str]:
+    """Return static-config effective Deep Research engine and model.
+
+    Resolution uses configuration only (no request overrides or live chat
+    session engines):
+
+    * engine: first nonempty of ``deep_research.engine``, ``engine.default``
+    * model: first nonempty of ``deep_research.model``, ``server.model``,
+      ``intelligence.default_model``
+    """
+    engine = _first_nonempty(
+        _get(config, "deep_research.engine", ""),
+        _get(config, "engine.default", ""),
+    )
+    model = _first_nonempty(
+        _get(config, "deep_research.model", ""),
+        _get(config, "server.model", ""),
+        _get(config, "intelligence.default_model", ""),
+    )
+    return engine, model
+
+
+def _first_nonempty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _scan_chunks_surface_active(config: Any, tools: set[str] | None = None) -> bool:
+    """Whether scan_chunks is configured or auto-installed via Deep Research."""
+    active = tools if tools is not None else _configured_tools(config)
+    if active & KNOWLEDGE_ENGINE_TOOLS:
+        return True
+    agent = str(_get(config, "agent.default_agent", "") or "").strip().lower()
+    return agent in {"deep_research", "research"}
+
+
+def _knowledge_store_exists(root: Path) -> bool:
+    """True when knowledge.db exists under the OpenJarvis home (metadata only)."""
+    return (root / "knowledge.db").exists()
+
+
+def _audit_knowledge_cloud_composition(
+    config: Any,
+    root: Path,
+    builder: _FindingBuilder,
+) -> None:
+    """Flag local knowledge chunks routed toward cloud Deep Research inference."""
+    tools = _configured_tools(config)
+    scan_active = _scan_chunks_surface_active(config, tools)
+    knowledge_exists = _knowledge_store_exists(root)
+    engine, model = _effective_deep_research_target(config)
+    cloud_target = _is_cloud_value(engine) or _looks_like_cloud_model(model)
+
+    if knowledge_exists and cloud_target:
+        # Deep Research auto-installs ScanChunksTool when knowledge.db exists.
+        evidence_parts = [
+            "knowledge.db exists",
+            (
+                "effective deep_research engine = "
+                f"{_quote(engine) if engine else '<empty>'}"
+            ),
+            (
+                "effective deep_research model = "
+                f"{_quote(model) if model else '<empty>'}"
+            ),
+        ]
+        if tools & KNOWLEDGE_ENGINE_TOOLS:
+            evidence_parts.append(
+                f"configured tool(s) = {_format_tools(tools & KNOWLEDGE_ENGINE_TOOLS)}"
+            )
+        else:
+            evidence_parts.append(
+                "deep research auto-installs scan_chunks when knowledge.db exists"
+            )
+        builder.add(
+            finding_id="knowledge-chunks-to-cloud-risk",
+            status="fail",
+            title="Local knowledge chunks may be sent to cloud inference",
+            potential_data_path=(
+                "local knowledge.db chunks -> scan_chunks / Deep Research -> "
+                "cloud inference"
+            ),
+            evidence="; ".join(evidence_parts),
+            recommendation=(
+                "Use a local Deep Research engine/model when knowledge.db contains "
+                "sensitive documents, or remove cloud defaults before scanning chunks."
+            ),
+        )
+    elif scan_active:
+        if tools & KNOWLEDGE_ENGINE_TOOLS:
+            evidence = (
+                f"configured tool(s) = {_format_tools(tools & KNOWLEDGE_ENGINE_TOOLS)}"
+            )
+        else:
+            agent_name = _get(config, "agent.default_agent", "")
+            evidence = f"agent.default_agent = {_quote(agent_name)}"
+        # Local effective target is informational; unset/unknown stays warn.
+        status: Status = "info" if engine and not cloud_target else "warn"
+        builder.add(
+            finding_id="knowledge-engine-tool-configured",
+            status=status,
+            title="Knowledge chunk scanning routes local chunks to an inference engine",
+            potential_data_path=(
+                "local knowledge-store chunks -> configured inference engine"
+            ),
+            evidence=evidence,
+            recommendation=(
+                "Review knowledge.db contents and the effective Deep Research "
+                "engine/model before scanning sensitive documents."
+            ),
+        )
+
+
 def _audit_security_settings(
     config: Any,
     builder: _FindingBuilder,
     *,
-    has_cloud_surface: bool,
+    has_external_surface: bool,
 ) -> None:
     profile = str(_get(config, "security.profile", "") or "").strip()
     if not profile:
@@ -619,23 +765,25 @@ def _audit_security_settings(
             ),
         )
 
-    if not has_cloud_surface:
+    if not has_external_surface:
         return
 
     if bool(_get(config, "security.local_engine_bypass", False)):
         builder.add(
             finding_id="security-local-engine-bypass-enabled",
             status="warn",
-            title="Local engine guardrail bypass is enabled with cloud surfaces",
+            title="Local engine guardrail bypass is enabled with external surfaces",
             potential_data_path=(
-                "cloud-bound prompts/outputs -> guardrails bypass for local engines"
+                "external or cloud-bound prompts/outputs -> guardrails bypass "
+                "for local engines"
             ),
             evidence=(
-                "security.local_engine_bypass = true with cloud-capable settings"
+                "security.local_engine_bypass = true with external or "
+                "cloud-capable settings"
             ),
             recommendation=(
-                "Disable local_engine_bypass unless the cloud surface is intentional "
-                "and reviewed."
+                "Disable local_engine_bypass unless the external surface is "
+                "intentional and reviewed."
             ),
         )
 
@@ -643,14 +791,17 @@ def _audit_security_settings(
         builder.add(
             finding_id="security-local-tool-bypass-enabled",
             status="warn",
-            title="Local tool guardrail bypass is enabled with cloud surfaces",
+            title="Local tool guardrail bypass is enabled with external surfaces",
             potential_data_path=(
-                "cloud-bound tool arguments/results -> guardrails bypass"
+                "external or cloud-bound tool arguments/results -> guardrails bypass"
             ),
-            evidence=("security.local_tool_bypass = true with cloud-capable settings"),
+            evidence=(
+                "security.local_tool_bypass = true with external or "
+                "cloud-capable settings"
+            ),
             recommendation=(
-                "Disable local_tool_bypass unless the cloud surface is intentional "
-                "and reviewed."
+                "Disable local_tool_bypass unless the external surface is "
+                "intentional and reviewed."
             ),
         )
 
@@ -860,6 +1011,9 @@ def _audit_tool_surfaces(config: Any, builder: _FindingBuilder) -> None:
                 "media providers."
             ),
         )
+
+    # scan_chunks / Deep Research knowledge routing is handled in
+    # _audit_knowledge_cloud_composition (needs knowledge.db existence).
 
     local_access = tools & LOCAL_ACCESS_TOOLS
     if local_access:
@@ -1219,6 +1373,24 @@ def _audit_frontend_storage_scope(builder: _FindingBuilder) -> None:
     )
 
 
+def _audit_generic_runtime_credentials(builder: _FindingBuilder) -> None:
+    """Report presence-only findings for remaining TOOL_CREDENTIALS env keys."""
+    for env_name in sorted(GENERIC_CREDENTIAL_ENV_VARS):
+        if not os.environ.get(env_name):
+            continue
+        builder.add(
+            finding_id=f"env-credential-generic-{env_name.lower()}",
+            status="info",
+            title=f"Runtime credential available in environment: {env_name}",
+            potential_data_path=f"process environment -> {env_name}",
+            evidence=f"{env_name} is set; value was not read or printed",
+            recommendation=(
+                "Unset unused runtime credentials. The audit reports only presence "
+                "and never prints credential values."
+            ),
+        )
+
+
 def _audit_skills_and_digest(config: Any, builder: _FindingBuilder) -> None:
     if bool(_get(config, "skills.enabled", False)):
         builder.add(
@@ -1276,13 +1448,9 @@ def _audit_speech_settings(config: Any, builder: _FindingBuilder) -> None:
         )
 
 
-def _has_cloud_or_api_surface(config: Any | None, active_tools: set[str]) -> bool:
-    if any(os.environ.get(name) for name in API_KEY_ENV_VARS):
-        return True
-    if active_tools & OUTBOUND_TOOL_SURFACES:
-        return True
+def _cloud_config_signals(config: Any | None) -> list[Any]:
     if config is None:
-        return False
+        return []
     values = [
         _get(config, "intelligence.provider", ""),
         _get(config, "intelligence.preferred_engine", ""),
@@ -1290,14 +1458,44 @@ def _has_cloud_or_api_surface(config: Any | None, active_tools: set[str]) -> boo
         _get(config, "intelligence.default_model", ""),
         _get(config, "deep_research.engine", ""),
         _get(config, "deep_research.model", ""),
-        _get(config, "learning.spec_search.teacher_engine", ""),
         _get(config, "optimize.optimizer_provider", ""),
         _get(config, "optimize.judge_model", ""),
         _get(config, "speech.backend", ""),
     ]
+    # Match finding logic: teacher engine only matters when spec search is on.
+    if bool(_get(config, "learning.spec_search.enabled", False)):
+        values.append(_get(config, "learning.spec_search.teacher_engine", ""))
+    return values
+
+
+def _has_cloud_api_surface(config: Any | None, active_tools: set[str]) -> bool:
+    """True when cloud inference/API-key surfaces are configured (not browser-only)."""
+    if any(os.environ.get(name) for name in API_KEY_ENV_VARS):
+        return True
+    if active_tools & CLOUD_API_SURFACES:
+        return True
     return any(
-        _is_cloud_value(value) or _looks_like_cloud_model(value) for value in values
+        _is_cloud_value(value) or _looks_like_cloud_model(value)
+        for value in _cloud_config_signals(config)
     )
+
+
+def _has_external_surface(config: Any | None, active_tools: set[str]) -> bool:
+    """True when external egress or cloud/API surfaces are present."""
+    if active_tools & EXTERNAL_TOOL_SURFACES:
+        return True
+    if (
+        _scan_chunks_surface_active(config, active_tools)
+        if config is not None
+        else False
+    ):
+        return True
+    return _has_cloud_api_surface(config, active_tools)
+
+
+def _has_cloud_or_api_surface(config: Any | None, active_tools: set[str]) -> bool:
+    """Backward-compatible alias for external-or-cloud surface detection."""
+    return _has_external_surface(config, active_tools)
 
 
 def _derive_verdict(findings: Iterable[DataBoundaryFinding]) -> str:
@@ -1306,6 +1504,8 @@ def _derive_verdict(findings: Iterable[DataBoundaryFinding]) -> str:
 
     if "memory-context-to-cloud-risk" in finding_ids:
         return "local memory may be sent to cloud inference"
+    if "knowledge-chunks-to-cloud-risk" in finding_ids:
+        return "local knowledge may be sent to cloud inference"
     if "config-root-error" in finding_ids:
         return "OpenJarvis home must be fixed before full data-boundary review"
     if "config-load-error" in finding_ids:
