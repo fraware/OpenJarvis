@@ -49,6 +49,10 @@ LOCAL_ENGINE_KEYS = {
 
 API_KEY_ENV_VARS = {
     "ANTHROPIC_API_KEY": ("Anthropic cloud inference", {"anthropic", "claude"}),
+    "CARTESIA_API_KEY": (
+        "Cartesia cloud text-to-speech",
+        {"cartesia", "text_to_speech"},
+    ),
     "DEEPSEEK_API_KEY": ("DeepSeek cloud inference", {"deepseek"}),
     "GEMINI_API_KEY": ("Google/Gemini cloud inference", {"google", "gemini"}),
     "GOOGLE_API_KEY": ("Google/Gemini cloud inference", {"google", "gemini"}),
@@ -203,7 +207,8 @@ BROWSER_TOOLS = {
 }
 GENERIC_NETWORK_TOOLS = {"http_request"}
 CHANNEL_OUTBOUND_TOOLS = {"channel_send"}
-CLOUD_MEDIA_TOOLS = {"audio_transcribe", "image_generate"}
+CLOUD_MEDIA_TOOLS = {"audio_transcribe", "image_generate", "text_to_speech"}
+CLOUD_TTS_BACKENDS = {"cartesia", "openai", "openai_tts"}
 # Local knowledge chunks scanned by an inference engine (Deep Research path).
 KNOWLEDGE_ENGINE_TOOLS = {"scan_chunks"}
 # External egress surfaces (web, browser, HTTP, channels, media, knowledge LM).
@@ -382,12 +387,18 @@ def build_data_boundary_report(
             root_error = f"{type(exc).__name__}: {exc}"
 
     if root_error:
+        error_type = str(root_error).partition(":")[0].strip() or "Error"
+        if not error_type.replace("_", "").isalnum():
+            error_type = "Error"
         builder.add(
             finding_id="config-root-error",
             status="fail",
             title="OpenJarvis home directory could not be resolved",
             potential_data_path="runtime state root -> local store checks",
-            evidence=_truncate(root_error),
+            evidence=(
+                f"{error_type} while resolving OpenJarvis home; "
+                "path details were redacted"
+            ),
             recommendation=(
                 "Fix OPENJARVIS_HOME or XDG_DATA_HOME before relying on "
                 "local-store data-boundary checks."
@@ -498,7 +509,12 @@ def _audit_outbound_settings(config: Any, builder: _FindingBuilder) -> None:
         )
 
     default_model = _get(config, "intelligence.default_model", "")
-    if _looks_like_cloud_model(default_model):
+    effective_engine = _first_nonempty(
+        _get(config, "intelligence.preferred_engine", ""),
+        _get(config, "engine.default", ""),
+        provider,
+    )
+    if _target_is_cloud(effective_engine, default_model):
         builder.add(
             finding_id="cloud-default-model-configured",
             status="warn",
@@ -545,7 +561,7 @@ def _audit_outbound_settings(config: Any, builder: _FindingBuilder) -> None:
         )
 
     judge_model = _get(config, "optimize.judge_model", "")
-    if _looks_like_cloud_model(judge_model):
+    if _target_is_cloud(optimize_provider, judge_model):
         builder.add(
             finding_id="cloud-judge-model-configured",
             status="info",
@@ -576,16 +592,7 @@ def _audit_telemetry_settings(config: Any, builder: _FindingBuilder) -> None:
 def _audit_memory_service(config: Any, builder: _FindingBuilder) -> None:
     if not bool(_get(config, "tools.storage.enabled", False)):
         return
-    cloud_signals = [
-        _get(config, "intelligence.provider", ""),
-        _get(config, "intelligence.preferred_engine", ""),
-        _get(config, "engine.default", ""),
-        _get(config, "intelligence.default_model", ""),
-    ]
-    has_cloud = any(
-        _is_cloud_value(value) or _looks_like_cloud_model(value)
-        for value in cloud_signals
-    )
+    has_cloud = bool(_primary_cloud_signals(config))
     evidence = "tools.storage.enabled = true"
     if has_cloud:
         evidence += "; cloud inference surface detected"
@@ -608,7 +615,8 @@ def _audit_deep_research_settings(config: Any, builder: _FindingBuilder) -> None
     engine = _get(config, "deep_research.engine", "")
     model = _get(config, "deep_research.model", "")
     cloud_engine = _is_cloud_value(engine)
-    cloud_model = _looks_like_cloud_model(model)
+    effective_engine, effective_model = _effective_deep_research_target(config)
+    cloud_model = bool(model) and _target_is_cloud(effective_engine, effective_model)
     if not cloud_engine and not cloud_model:
         return
     evidence_parts = []
@@ -683,7 +691,7 @@ def _audit_knowledge_cloud_composition(
     scan_active = _scan_chunks_surface_active(config, tools)
     knowledge_exists = _knowledge_store_exists(root)
     engine, model = _effective_deep_research_target(config)
-    cloud_target = _is_cloud_value(engine) or _looks_like_cloud_model(model)
+    cloud_target = _target_is_cloud(engine, model)
 
     if knowledge_exists and cloud_target:
         # Deep Research auto-installs ScanChunksTool when knowledge.db exists.
@@ -811,17 +819,7 @@ def _audit_memory_cloud_composition(
     builder: _FindingBuilder,
 ) -> None:
     context_from_memory = bool(_get(config, "agent.context_from_memory", False))
-    cloud_signals = [
-        _get(config, "intelligence.provider", ""),
-        _get(config, "intelligence.preferred_engine", ""),
-        _get(config, "engine.default", ""),
-        _get(config, "intelligence.default_model", ""),
-    ]
-    active_cloud = [
-        str(value)
-        for value in cloud_signals
-        if _is_cloud_value(value) or _looks_like_cloud_model(value)
-    ]
+    active_cloud = _primary_cloud_signals(config)
 
     if context_from_memory and active_cloud:
         builder.add(
@@ -1000,6 +998,8 @@ def _audit_tool_surfaces(config: Any, builder: _FindingBuilder) -> None:
             path_parts.append("image prompt -> external media provider")
         if "audio_transcribe" in cloud_media:
             path_parts.append("local audio file -> external media provider")
+        if "text_to_speech" in cloud_media:
+            path_parts.append("text content -> external text-to-speech provider")
         builder.add(
             finding_id="cloud-media-tool-configured",
             status="warn",
@@ -1170,8 +1170,11 @@ def _audit_environment_credentials(
                 str(_get(config, "intelligence.preferred_engine", "")).lower(),
                 str(_get(config, "engine.default", "")).lower(),
                 str(_get(config, "intelligence.default_model", "")).lower(),
+                str(_get(config, "speech.backend", "")).lower(),
             }
         )
+        if bool(_get(config, "digest.enabled", False)):
+            active_values.add(str(_get(config, "digest.tts_backend", "")).lower())
 
     for env_name, (purpose, aliases) in sorted(API_KEY_ENV_VARS.items()):
         if not os.environ.get(env_name):
@@ -1192,12 +1195,21 @@ def _audit_environment_credentials(
 
 
 def _audit_server_exposure(config: Any, builder: _FindingBuilder) -> None:
-    host = str(_get(config, "server.host", "") or "")
-    if host in {"0.0.0.0", "::"}:
+    host = str(_get(config, "server.host", "") or "").strip()
+    if not _is_loopback_host(host):
+        binds_all = host in {"0.0.0.0", "::"}
         builder.add(
-            finding_id="server-binds-all-interfaces",
+            finding_id=(
+                "server-binds-all-interfaces"
+                if binds_all
+                else "server-binds-non-loopback-interface"
+            ),
             status="warn",
-            title="Server is configured to bind all network interfaces",
+            title=(
+                "Server is configured to bind all network interfaces"
+                if binds_all
+                else "Server is configured to bind a non-loopback interface"
+            ),
             potential_data_path="OpenJarvis HTTP server -> local network interfaces",
             evidence=f"server.host = {_quote(host)}",
             recommendation=(
@@ -1447,25 +1459,22 @@ def _audit_speech_settings(config: Any, builder: _FindingBuilder) -> None:
             ),
         )
 
-
-def _cloud_config_signals(config: Any | None) -> list[Any]:
-    if config is None:
-        return []
-    values = [
-        _get(config, "intelligence.provider", ""),
-        _get(config, "intelligence.preferred_engine", ""),
-        _get(config, "engine.default", ""),
-        _get(config, "intelligence.default_model", ""),
-        _get(config, "deep_research.engine", ""),
-        _get(config, "deep_research.model", ""),
-        _get(config, "optimize.optimizer_provider", ""),
-        _get(config, "optimize.judge_model", ""),
-        _get(config, "speech.backend", ""),
-    ]
-    # Match finding logic: teacher engine only matters when spec search is on.
-    if bool(_get(config, "learning.spec_search.enabled", False)):
-        values.append(_get(config, "learning.spec_search.teacher_engine", ""))
-    return values
+    digest_enabled = bool(_get(config, "digest.enabled", False))
+    tts_backend = str(_get(config, "digest.tts_backend", "") or "").lower()
+    if digest_enabled and tts_backend in CLOUD_TTS_BACKENDS:
+        builder.add(
+            finding_id="cloud-tts-backend-configured",
+            status="warn",
+            title="Cloud text-to-speech backend configured for digests",
+            potential_data_path=(
+                "personal digest narrative -> cloud text-to-speech provider"
+            ),
+            evidence=f"digest.tts_backend = {_quote(tts_backend)}",
+            recommendation=(
+                "Use a local text-to-speech backend or disable digest audio when "
+                "the generated narrative contains sensitive personal data."
+            ),
+        )
 
 
 def _has_cloud_api_surface(config: Any | None, active_tools: set[str]) -> bool:
@@ -1474,10 +1483,33 @@ def _has_cloud_api_surface(config: Any | None, active_tools: set[str]) -> bool:
         return True
     if active_tools & CLOUD_API_SURFACES:
         return True
-    return any(
-        _is_cloud_value(value) or _looks_like_cloud_model(value)
-        for value in _cloud_config_signals(config)
-    )
+    if config is None:
+        return False
+    if _primary_cloud_signals(config):
+        return True
+    deep_engine, deep_model = _effective_deep_research_target(config)
+    if _target_is_cloud(deep_engine, deep_model):
+        return True
+    optimizer_provider = _get(config, "optimize.optimizer_provider", "")
+    if _target_is_cloud(optimizer_provider, _get(config, "optimize.judge_model", "")):
+        return True
+    if str(_get(config, "speech.backend", "") or "").lower() in {
+        "openai",
+        "deepgram",
+    }:
+        return True
+    if (
+        bool(_get(config, "digest.enabled", False))
+        and str(_get(config, "digest.tts_backend", "") or "").lower()
+        in CLOUD_TTS_BACKENDS
+    ):
+        return True
+    if bool(_get(config, "learning.spec_search.enabled", False)):
+        return _target_is_cloud(
+            _get(config, "learning.spec_search.teacher_engine", ""),
+            _get(config, "learning.spec_search.teacher_model", ""),
+        )
+    return False
 
 
 def _has_external_surface(config: Any | None, active_tools: set[str]) -> bool:
@@ -1520,6 +1552,7 @@ def _derive_verdict(findings: Iterable[DataBoundaryFinding]) -> str:
             "cloud-default-engine-configured",
             "cloud-default-model-configured",
             "cloud-speech-backend-configured",
+            "cloud-tts-backend-configured",
             "deep-research-cloud-configured",
         }
     ):
@@ -1567,6 +1600,39 @@ def _is_cloud_value(value: Any) -> bool:
     return any(key in text for key in CLOUD_PROVIDER_KEYS)
 
 
+def _is_local_engine_value(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip().lower().replace("-", "_")
+    return text in LOCAL_ENGINE_KEYS
+
+
+def _target_is_cloud(engine: Any, model: Any) -> bool:
+    """Classify a model target without treating local vendor model IDs as cloud."""
+    if _is_cloud_value(engine):
+        return True
+    if _is_local_engine_value(engine):
+        return False
+    return _looks_like_cloud_model(model)
+
+
+def _primary_cloud_signals(config: Any) -> list[str]:
+    """Return explicit cloud signals for the primary inference target."""
+    provider = _get(config, "intelligence.provider", "")
+    preferred_engine = _get(config, "intelligence.preferred_engine", "")
+    default_engine = _get(config, "engine.default", "")
+    default_model = _get(config, "intelligence.default_model", "")
+    signals = [
+        str(value)
+        for value in (provider, preferred_engine, default_engine)
+        if _is_cloud_value(value)
+    ]
+    effective_engine = _first_nonempty(preferred_engine, default_engine, provider)
+    if not signals and _target_is_cloud(effective_engine, default_model):
+        signals.append(str(default_model))
+    return signals
+
+
 def _looks_like_cloud_model(value: Any) -> bool:
     if value is None:
         return False
@@ -1574,6 +1640,17 @@ def _looks_like_cloud_model(value: Any) -> bool:
     if not text:
         return False
     return any(key in text for key in CLOUD_PROVIDER_KEYS) or text.startswith("gpt-")
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host in {"", "localhost"}:
+        return True
+    try:
+        import ipaddress
+
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _iter_digest_sources(config: Any) -> Iterable[str]:

@@ -460,8 +460,6 @@ def _resolve_data_boundary_config_path() -> Path:
 
 def _load_data_boundary_config():
     """Load config without treating missing config as active."""
-    from openjarvis.core.config import JarvisConfig, load_config
-
     root = None
     root_error = ""
     try:
@@ -470,6 +468,14 @@ def _load_data_boundary_config():
     except Exception as exc:
         config_path = None
         root_error = f"{type(exc).__name__}: {exc}"
+
+    if root_error:
+        return None, root, False, "", root_error
+
+    try:
+        from openjarvis.core.config import JarvisConfig, load_config
+    except Exception as exc:
+        return None, root, False, f"{type(exc).__name__}: {exc}", ""
 
     if config_path is None or not config_path.exists():
         return JarvisConfig(), root, False, "", root_error

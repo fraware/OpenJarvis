@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -361,3 +365,32 @@ def test_data_boundary_loader_reports_root_error(monkeypatch):
     assert loaded is False
     assert error == ""
     assert "bad home" in root_error
+
+
+def test_data_boundary_cli_reports_real_root_error_without_import_crash():
+    repo_root = Path(__file__).resolve().parents[2]
+    invalid_home = repo_root / ".invalid-openjarvis-home"
+    env = os.environ.copy()
+    env["OPENJARVIS_HOME"] = str(invalid_home)
+    env["PYTHONPATH"] = str(repo_root / "src")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from openjarvis.cli import main; main()",
+            "scan",
+            "--data-boundaries",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["findings"][0]["id"] == "config-root-error"
+    assert str(invalid_home) not in result.stdout
+    assert str(repo_root) not in result.stdout

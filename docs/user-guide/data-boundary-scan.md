@@ -53,7 +53,7 @@ The current checks cover:
 - local knowledge.db composition with cloud-capable Deep Research targets
 - server binding and unauthenticated A2A exposure
 - channel enablement, channel credential fields, and channel credential env vars
-- skills, skill auto-sync, digest sources, and cloud speech backends
+- skills, skill auto-sync, digest sources, and cloud speech/TTS backends such as Cartesia
 - local stores such as `knowledge.db`, `credentials.toml`, `memory.db`, `traces.db`,
   `telemetry.db`, `scheduler.db`, embeddings, skill index, `.vault_key`, and memory files
 - connector credential files under `connectors/*.json`, without reading them
@@ -67,6 +67,10 @@ OpenJarvis home directory.
 Static Deep Research targeting uses configuration only (no request overrides):
 `deep_research.engine` or `engine.default`, and `deep_research.model` or
 `server.model` or `intelligence.default_model`.
+
+Model identifiers that contain vendor names (for example `deepseek-r1` or
+`openai/gpt-oss`) are not treated as cloud-bound when their effective engine is
+explicitly local, such as Ollama.
 
 ## Status levels
 

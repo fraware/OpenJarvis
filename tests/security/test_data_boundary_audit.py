@@ -34,7 +34,11 @@ EXPECTED_BROWSER_TOOLS = {
 
 EXPECTED_GENERIC_NETWORK_TOOLS = {"http_request"}
 EXPECTED_CHANNEL_OUTBOUND_TOOLS = {"channel_send"}
-EXPECTED_CLOUD_MEDIA_TOOLS = {"audio_transcribe", "image_generate"}
+EXPECTED_CLOUD_MEDIA_TOOLS = {
+    "audio_transcribe",
+    "image_generate",
+    "text_to_speech",
+}
 EXPECTED_KNOWLEDGE_ENGINE_TOOLS = {"scan_chunks"}
 
 EXPECTED_LOCAL_ACCESS_TOOLS = {
@@ -197,6 +201,25 @@ def test_memory_plus_cloud_provider_is_fail(tmp_path):
     findings = {finding.id: finding for finding in report.findings}
     assert findings["memory-context-to-cloud-risk"].status == "fail"
     assert report.verdict == "local memory may be sent to cloud inference"
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["deepseek-r1:7b", "google/gemma-3-4b-it", "openai/gpt-oss-20b"],
+)
+def test_local_engine_vendor_model_names_are_not_cloud(tmp_path, model):
+    config = _low_noise_config()
+    config.engine.default = "ollama"
+    config.intelligence.default_model = model
+    config.agent.context_from_memory = True
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert "cloud-default-model-configured" not in findings
+    assert "memory-context-to-cloud-risk" not in findings
+    assert "frontend-credential-storage-not-inspected" not in findings
+    assert findings["memory-context-injection-enabled"].status == "info"
 
 
 def test_analytics_is_info_and_does_not_assert_prompt_capture(tmp_path):
@@ -364,6 +387,19 @@ def test_server_all_interfaces_is_warn(tmp_path):
     assert findings["server-binds-all-interfaces"].status == "warn"
 
 
+@pytest.mark.parametrize("host", ["192.168.1.50", "203.0.113.5"])
+def test_server_non_loopback_interface_is_warn(tmp_path, host):
+    config = _low_noise_config()
+    config.server.host = host
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    findings = {finding.id: finding for finding in report.findings}
+    finding = findings["server-binds-non-loopback-interface"]
+    assert finding.status == "warn"
+    assert host in finding.evidence
+
+
 def test_a2a_without_auth_token_is_fail(tmp_path):
     config = _low_noise_config()
     config.a2a.enabled = True
@@ -444,6 +480,27 @@ def test_cloud_speech_backend_is_warn(tmp_path):
     assert findings["cloud-speech-backend-configured"].status == "warn"
 
 
+def test_cartesia_digest_tts_and_credential_are_reported_without_leak(
+    tmp_path,
+    monkeypatch,
+):
+    config = _low_noise_config()
+    config.digest.enabled = True
+    config.digest.tts_backend = "cartesia"
+    monkeypatch.setenv("CARTESIA_API_KEY", "secret-cartesia-key")
+
+    report = build_data_boundary_report(config, tmp_path)
+    payload = report.to_dict(show_paths=True)
+
+    findings = {finding.id: finding for finding in report.findings}
+    assert findings["cloud-tts-backend-configured"].status == "warn"
+    credential = findings["env-credential-cartesia_api_key"]
+    assert credential.status == "warn"
+    assert "CARTESIA_API_KEY is set" in credential.evidence
+    assert "secret-cartesia-key" not in str(payload)
+    assert report.verdict == "cloud-capable data boundaries configured"
+
+
 def test_skills_auto_sync_is_warn(tmp_path):
     config = _low_noise_config()
     config.skills.auto_sync = True
@@ -479,6 +536,7 @@ def test_memory_service_enabled_warns_with_cloud_engine(tmp_path):
 
 def test_default_model_cloud_detection(tmp_path):
     config = _low_noise_config()
+    config.engine.default = "openai"
     config.intelligence.default_model = "gpt-4o"
 
     report = build_data_boundary_report(config, tmp_path)
@@ -542,11 +600,16 @@ def test_config_root_error_returns_fail_without_local_store_scan(tmp_path):
     report = build_data_boundary_report(
         config,
         None,
-        root_error="ConfigurationError: bad OPENJARVIS_HOME",
+        root_error=(
+            "ConfigurationError: bad OPENJARVIS_HOME at /Users/alice/private/openjarvis"
+        ),
     )
 
     findings = {finding.id: finding for finding in report.findings}
     assert findings["config-root-error"].status == "fail"
+    assert "bad OPENJARVIS_HOME" not in findings["config-root-error"].evidence
+    assert "/Users/alice/private/openjarvis" not in str(report.to_dict())
+    assert "path details were redacted" in findings["config-root-error"].evidence
     assert report.root == "<unresolved-openjarvis-home>"
 
 
@@ -1197,6 +1260,8 @@ enabled = [
 """
     config_path = tmp_path / "config.toml"
     config_path.write_text(profile, encoding="utf-8")
+    if os.name != "nt":
+        config_path.chmod(0o600)
     config = load_config(config_path)
     # Mirror _low_noise_config store-path clearing so real home files are ignored.
     config.traces.db_path = ""
