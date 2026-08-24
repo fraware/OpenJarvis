@@ -202,16 +202,10 @@ def serve(
     # If cloud API keys are set, prepare a cloud engine. We build the
     # MultiEngine after local discovery so healthy local fallbacks such as
     # Ollama stay visible even when the configured preferred engine is MLX.
-    import os
+    from openjarvis.engine.cloud_activation import active_server_cloud_credentials
 
     cloud_engine = None
-    _has_cloud = (
-        os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or os.environ.get("OPENROUTER_API_KEY")
-    )
+    _has_cloud = bool(active_server_cloud_credentials())
     if _has_cloud and engine_name != "cloud":
         try:
             from openjarvis.engine.cloud import CloudEngine

@@ -43,7 +43,7 @@ OAuth token files.
 The current checks cover:
 
 - cloud-capable model provider, engine, and default model settings
-- cloud-engine auto-activation in `jarvis serve` from supported API credentials
+- cloud-engine auto-activation in `jarvis serve` from a shared credential declaration
 - NVIDIA NIM default-vendor versus custom-endpoint boundary semantics
 - local memory context injection combined with cloud-capable inference
 - traces, telemetry, learning, training, and spec-search settings
@@ -149,7 +149,9 @@ enabled = false
 Also unset cloud and channel credentials from the process environment when they
 are not needed. `jarvis serve` can automatically make cloud inference available
 when supported cloud-provider API credentials are present, so strict local-only
-checks treat those credentials as an active cloud-capable surface.
+checks treat those credentials as an active cloud-capable surface. An explicit
+`deep_research.engine` remains authoritative for the static Deep Research
+composition check.
 
 ## Scope and non-goals
 

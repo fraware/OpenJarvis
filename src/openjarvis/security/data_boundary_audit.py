@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any, Iterable, Literal
 
 from openjarvis.core.credentials import TOOL_CREDENTIALS
+from openjarvis.engine.cloud_activation import (
+    SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,
+    active_server_cloud_credentials,
+)
 
 Status = Literal["fail", "warn", "info"]
 
@@ -63,19 +67,6 @@ API_KEY_ENV_VARS = {
     "OPENROUTER_API_KEY": ("OpenRouter cloud inference", {"openrouter"}),
     "TAVILY_API_KEY": ("Tavily web search", {"tavily", "web_search"}),
 }
-
-# `jarvis serve` automatically constructs a cloud engine when any of
-# these credentials are present. Keep this explicit until runtime and
-# diagnostics share one capability descriptor (follow-up architecture).
-SERVER_AUTO_CLOUD_ENGINE_ENV_VARS = frozenset(
-    {
-        "ANTHROPIC_API_KEY",
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "OPENAI_API_KEY",
-        "OPENROUTER_API_KEY",
-    }
-)
 
 CHANNEL_SECRET_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("channel.telegram.bot_token", "Telegram bot token", "Telegram"),
@@ -711,12 +702,14 @@ def _audit_knowledge_cloud_composition(
     knowledge_exists = _knowledge_store_exists(root)
     engine, model = _effective_deep_research_target(config)
     server_cloud_envs = _server_auto_cloud_envs()
+    explicit_deep_engine = str(_get(config, "deep_research.engine", "") or "").strip()
+    server_cloud_possible = bool(server_cloud_envs) and not explicit_deep_engine
     nim_vendor_cloud = _nim_uses_default_vendor_host(engine)
     nim_custom_host = _nim_uses_custom_host(engine)
     cloud_target = (
         _target_is_cloud(engine, model)
         or nim_vendor_cloud
-        or bool(server_cloud_envs)
+        or server_cloud_possible
     )
 
     if knowledge_exists and cloud_target:
@@ -732,7 +725,7 @@ def _audit_knowledge_cloud_composition(
                 f"{_quote(model) if model else '<empty>'}"
             ),
         ]
-        if server_cloud_envs:
+        if server_cloud_possible:
             evidence_parts.append(
                 "server cloud-engine credential(s) present: "
                 + ", ".join(server_cloud_envs)
@@ -1232,9 +1225,7 @@ def _server_auto_cloud_envs() -> list[str]:
     Presence is sufficient because ``jarvis serve`` uses the same condition to
     construct a cloud engine. Values are never read or printed.
     """
-    return sorted(
-        name for name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS if os.environ.get(name)
-    )
+    return list(active_server_cloud_credentials())
 
 
 def _audit_server_cloud_engine_activation(builder: _FindingBuilder) -> None:

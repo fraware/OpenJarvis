@@ -162,6 +162,22 @@ def test_knowledge_plus_default_nim_is_fail(tmp_path, monkeypatch):
     assert report.verdict == "local knowledge may be sent to cloud inference"
 
 
+def test_explicit_local_deep_research_engine_overrides_server_cloud_capability(
+    tmp_path, monkeypatch
+):
+    _clear_boundary_env(monkeypatch)
+    config = _low_noise_config()
+    config.deep_research.engine = "ollama"
+    monkeypatch.setenv("OPENAI_API_KEY", "canary-openai-secret")
+    (tmp_path / "knowledge.db").write_text("", encoding="utf-8")
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = _findings(report)
+
+    assert "knowledge-chunks-to-cloud-risk" not in findings
+    assert findings["server-cloud-engine-credential-present"].status == "warn"
+
+
 def test_knowledge_plus_custom_nim_endpoint_is_warn(tmp_path, monkeypatch):
     _clear_boundary_env(monkeypatch)
     config = _low_noise_config()
