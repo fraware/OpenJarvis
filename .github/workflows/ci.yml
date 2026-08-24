@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, ci/data-boundary-runtime-parity-base]
 
 concurrency:
   group: ci-${{ github.ref }}
