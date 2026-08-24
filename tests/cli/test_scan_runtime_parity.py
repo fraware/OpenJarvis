@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from click.testing import CliRunner
 
 from openjarvis.cli.scan_cmd import scan
@@ -61,7 +63,7 @@ def test_strict_mode_fails_when_server_cloud_engine_can_auto_activate(
 ):
     for env_name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS:
         monkeypatch.delenv(env_name, raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "canary-openai-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
 
     config = _low_noise_config()
     monkeypatch.setattr(
@@ -70,8 +72,13 @@ def test_strict_mode_fails_when_server_cloud_engine_can_auto_activate(
     )
     monkeypatch.setattr("openjarvis.cli.scan_cmd.get_config_dir", lambda: tmp_path)
 
-    result = CliRunner().invoke(scan, ["--data-boundaries", "--strict"])
+    result = CliRunner().invoke(
+        scan,
+        ["--data-boundaries", "--strict", "--json"],
+    )
 
     assert result.exit_code == 1
-    assert "Cloud inference can be activated automatically" in result.output
-    assert "canary-openai-secret" not in result.output
+    payload = json.loads(result.output)
+    findings = {finding["id"]: finding for finding in payload["findings"]}
+    assert findings["server-cloud-engine-credential-present"]["status"] == "warn"
+    assert "canary-provider-secret" not in result.output

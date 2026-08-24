@@ -82,15 +82,15 @@ def test_server_auto_cloud_credential_is_warn_without_cloud_config(
 ):
     _clear_boundary_env(monkeypatch)
     config = _low_noise_config()
-    monkeypatch.setenv("OPENAI_API_KEY", "canary-openai-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
 
     report = build_data_boundary_report(config, tmp_path)
     findings = _findings(report)
 
     assert findings["server-cloud-engine-credential-present"].status == "warn"
-    assert findings["env-credential-openai_api_key"].status == "warn"
+    assert findings["env-credential-anthropic_api_key"].status == "info"
     rendered = str(report.to_dict(show_paths=True))
-    assert "canary-openai-secret" not in rendered
+    assert "canary-provider-secret" not in rendered
     assert report.verdict == "cloud-capable data boundaries configured"
 
 
@@ -98,12 +98,13 @@ def test_memory_plus_server_auto_cloud_credential_is_fail(tmp_path, monkeypatch)
     _clear_boundary_env(monkeypatch)
     config = _low_noise_config()
     config.agent.context_from_memory = True
-    monkeypatch.setenv("OPENAI_API_KEY", "canary-openai-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
 
     report = build_data_boundary_report(config, tmp_path)
     findings = _findings(report)
 
     assert findings["memory-context-to-cloud-risk"].status == "fail"
+    assert "canary-provider-secret" not in str(report.to_dict(show_paths=True))
     assert report.verdict == "local memory may be sent to cloud inference"
 
 
@@ -151,6 +152,21 @@ def test_custom_nim_endpoint_is_unknown_and_redacted(tmp_path, monkeypatch):
     assert report.verdict == "custom NIM endpoint requires data-boundary review"
 
 
+def test_empty_nim_host_override_is_not_misclassified_as_vendor_default(
+    tmp_path, monkeypatch
+):
+    _clear_boundary_env(monkeypatch)
+    config = _low_noise_config()
+    config.engine.default = "nim"
+    monkeypatch.setenv("NIM_HOST", "")
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = _findings(report)
+
+    assert findings["nim-custom-endpoint-configured"].status == "warn"
+    assert "nim-vendor-cloud-default-endpoint" not in findings
+
+
 def test_knowledge_plus_default_nim_is_fail(tmp_path, monkeypatch):
     _clear_boundary_env(monkeypatch)
     config = _low_noise_config()
@@ -169,7 +185,7 @@ def test_explicit_local_deep_research_engine_overrides_server_cloud_capability(
     _clear_boundary_env(monkeypatch)
     config = _low_noise_config()
     config.deep_research.engine = "ollama"
-    monkeypatch.setenv("OPENAI_API_KEY", "canary-openai-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
     (tmp_path / "knowledge.db").write_text("", encoding="utf-8")
 
     report = build_data_boundary_report(config, tmp_path)

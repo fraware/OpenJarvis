@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, Iterable, Literal
 
 from openjarvis.core.cloud_activation import (
-    SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,
     active_server_cloud_credentials,
 )
 from openjarvis.core.credentials import TOOL_CREDENTIALS
@@ -1220,8 +1219,8 @@ def _audit_connector_credentials(root: Path, builder: _FindingBuilder) -> None:
 def _server_auto_cloud_envs() -> list[str]:
     """Return server cloud-engine activation keys that are present.
 
-    Presence is sufficient because ``jarvis serve`` uses the same condition to
-    construct a cloud engine. Credential values are never emitted.
+    A non-empty value is sufficient because ``jarvis serve`` uses the same
+    truthiness check. Credential values are never emitted.
     """
     return list(active_server_cloud_credentials())
 
@@ -1260,12 +1259,17 @@ def _primary_effective_engine(config: Any) -> str:
     )
 
 
+def _nim_host_override_present() -> bool:
+    """Return whether NIM_HOST exists without inspecting its value."""
+    return "NIM_HOST" in os.environ
+
+
 def _nim_uses_default_vendor_host(engine: Any) -> bool:
-    return _is_nim_engine_value(engine) and not bool(os.environ.get("NIM_HOST"))
+    return _is_nim_engine_value(engine) and not _nim_host_override_present()
 
 
 def _nim_uses_custom_host(engine: Any) -> bool:
-    return _is_nim_engine_value(engine) and bool(os.environ.get("NIM_HOST"))
+    return _is_nim_engine_value(engine) and _nim_host_override_present()
 
 
 def _configured_nim_paths(config: Any) -> list[str]:
@@ -1283,7 +1287,7 @@ def _audit_nim_settings(config: Any, builder: _FindingBuilder) -> None:
     if not paths:
         return
     selected = ", ".join(f"{path} = 'nim'" for path in paths)
-    if os.environ.get("NIM_HOST"):
+    if _nim_host_override_present():
         builder.add(
             finding_id="nim-custom-endpoint-configured",
             status="warn",
@@ -1334,9 +1338,7 @@ def _audit_environment_credentials(
     for env_name, (purpose, aliases) in sorted(API_KEY_ENV_VARS.items()):
         if not os.environ.get(env_name):
             continue
-        active = env_name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS or any(
-            alias in value for alias in aliases for value in active_values
-        )
+        active = any(alias in value for alias in aliases for value in active_values)
         status: Status = "warn" if active else "info"
         builder.add(
             finding_id=f"env-credential-{env_name.lower()}",
