@@ -1,0 +1,38 @@
+name: Apply data-boundary runtime parity patch
+
+on:
+  push:
+    branches:
+      - fix/data-boundary-runtime-parity
+    paths:
+      - scripts/_apply_data_boundary_runtime_parity.py
+      - .github/workflows/_apply-data-boundary-runtime-parity.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/data-boundary-runtime-parity
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply assertion-guarded patch
+        run: python scripts/_apply_data_boundary_runtime_parity.py
+      - name: Validate generated Python and whitespace
+        run: |
+          python -m py_compile src/openjarvis/security/data_boundary_audit.py
+          git diff --check
+      - name: Commit generated changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/openjarvis/security/data_boundary_audit.py docs/user-guide/data-boundary-scan.md
+          git diff --cached --quiet && exit 0
+          git commit -m "fix(scan): align data-boundary audit with runtime activation"
+          git push origin HEAD:fix/data-boundary-runtime-parity
