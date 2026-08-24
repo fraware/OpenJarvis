@@ -14,11 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-from openjarvis.core.credentials import TOOL_CREDENTIALS
-from openjarvis.engine.cloud_activation import (
+from openjarvis.core.cloud_activation import (
     SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,
     active_server_cloud_credentials,
 )
+from openjarvis.core.credentials import TOOL_CREDENTIALS
 
 Status = Literal["fail", "warn", "info"]
 
@@ -707,9 +707,7 @@ def _audit_knowledge_cloud_composition(
     nim_vendor_cloud = _nim_uses_default_vendor_host(engine)
     nim_custom_host = _nim_uses_custom_host(engine)
     cloud_target = (
-        _target_is_cloud(engine, model)
-        or nim_vendor_cloud
-        or server_cloud_possible
+        _target_is_cloud(engine, model) or nim_vendor_cloud or server_cloud_possible
     )
 
     if knowledge_exists and cloud_target:
@@ -765,8 +763,8 @@ def _audit_knowledge_cloud_composition(
                 "local knowledge.db chunks -> Deep Research -> custom NIM endpoint"
             ),
             evidence=(
-                "knowledge.db exists; NIM_HOST is set; value was not read "
-                "or printed"
+                "knowledge.db exists; NIM_HOST is set; value was not "
+                "inspected or printed"
             ),
             recommendation=(
                 "Verify the NIM endpoint trust boundary before scanning "
@@ -894,7 +892,7 @@ def _audit_memory_cloud_composition(
             ),
             evidence=(
                 "agent.context_from_memory = true; NIM_HOST is set; "
-                "value was not read or printed"
+                "value was not inspected or printed"
             ),
             recommendation=(
                 "Verify the custom NIM endpoint trust boundary, or disable "
@@ -1223,7 +1221,7 @@ def _server_auto_cloud_envs() -> list[str]:
     """Return server cloud-engine activation keys that are present.
 
     Presence is sufficient because ``jarvis serve`` uses the same condition to
-    construct a cloud engine. Values are never read or printed.
+    construct a cloud engine. Credential values are never emitted.
     """
     return list(active_server_cloud_credentials())
 
@@ -1240,7 +1238,7 @@ def _audit_server_cloud_engine_activation(builder: _FindingBuilder) -> None:
         evidence=(
             "credential variable(s) set: "
             + ", ".join(active)
-            + "; values were not read or printed"
+            + "; values were not inspected or printed"
         ),
         recommendation=(
             "Unset these variables for strict local-only server operation, or review "
@@ -1291,7 +1289,9 @@ def _audit_nim_settings(config: Any, builder: _FindingBuilder) -> None:
             status="warn",
             title="NVIDIA NIM uses a custom endpoint with unknown locality",
             potential_data_path="model requests -> custom NIM endpoint",
-            evidence=f"{selected}; NIM_HOST is set; value was not read or printed",
+            evidence=(
+                f"{selected}; NIM_HOST is set; value was not inspected or printed"
+            ),
             recommendation=(
                 "Verify that the custom NIM endpoint is within the intended trust "
                 "boundary before sending sensitive prompts or local context."

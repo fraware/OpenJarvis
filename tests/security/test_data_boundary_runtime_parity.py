@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from pathlib import Path
+import subprocess
+import sys
 
+from openjarvis.core.cloud_activation import SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
 from openjarvis.core.config import JarvisConfig
 from openjarvis.security.data_boundary_audit import (
-    API_KEY_ENV_VARS,
-    SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,
     _CONFIG_STORE_PATHS,
+    API_KEY_ENV_VARS,
     build_data_boundary_report,
 )
 
@@ -192,9 +193,7 @@ def test_knowledge_plus_custom_nim_endpoint_is_warn(tmp_path, monkeypatch):
     assert "knowledge-chunks-to-cloud-risk" not in findings
 
 
-def test_nim_api_key_is_specialized_and_redacted_when_nim_active(
-    tmp_path, monkeypatch
-):
+def test_nim_api_key_is_specialized_and_redacted_when_nim_active(tmp_path, monkeypatch):
     _clear_boundary_env(monkeypatch)
     config = _low_noise_config()
     config.engine.default = "nim"
@@ -238,6 +237,23 @@ def test_custom_agent_manager_db_path_is_audited(tmp_path, monkeypatch):
 
     assert finding.absolute_location == str(custom_db)
     assert finding.location == "<redacted>"
+
+
+def test_data_boundary_import_does_not_load_engine_package():
+    code = (
+        "import sys; "
+        "import openjarvis.security.data_boundary_audit; "
+        "assert 'openjarvis.engine' not in sys.modules, "
+        "'data-boundary diagnostics must stay independent of engine imports'"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_config_store_paths_resolve_against_jarvis_config_schema():

@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-
 SERVER_AUTO_CLOUD_ENGINE_ENV_VARS = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -35,11 +34,7 @@ def active_server_cloud_credentials(
 
     source = os.environ if environ is None else environ
     return tuple(
-        sorted(
-            name
-            for name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
-            if source.get(name)
-        )
+        sorted(name for name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS if source.get(name))
     )
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from openjarvis.engine.cloud_activation import (
+from openjarvis.core.cloud_activation import (
     SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,
     active_server_cloud_credentials,
 )

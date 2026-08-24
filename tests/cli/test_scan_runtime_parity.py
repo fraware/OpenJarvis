@@ -3,8 +3,8 @@ from __future__ import annotations
 from click.testing import CliRunner
 
 from openjarvis.cli.scan_cmd import scan
+from openjarvis.core.cloud_activation import SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
 from openjarvis.core.config import JarvisConfig
-from openjarvis.security.data_boundary_audit import SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
 
 
 def _low_noise_config() -> JarvisConfig:
