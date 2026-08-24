@@ -5,7 +5,7 @@ on:
     branches:
       - fix/data-boundary-runtime-parity
     paths:
-      - scripts/_apply_data_boundary_runtime_parity.py
+      - scripts/_refine_data_boundary_runtime_parity.py
       - .github/workflows/_apply-data-boundary-runtime-parity.yml
 
 permissions:
@@ -22,17 +22,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Apply assertion-guarded patch
-        run: python scripts/_apply_data_boundary_runtime_parity.py
+      - name: Apply assertion-guarded refinement
+        run: python scripts/_refine_data_boundary_runtime_parity.py
       - name: Validate generated Python and whitespace
         run: |
-          python -m py_compile src/openjarvis/security/data_boundary_audit.py
+          python -m py_compile \
+            src/openjarvis/security/data_boundary_audit.py \
+            src/openjarvis/cli/serve.py \
+            src/openjarvis/engine/cloud_activation.py \
+            tests/security/test_data_boundary_runtime_parity.py \
+            tests/engine/test_cloud_activation.py \
+            tests/cli/test_scan_runtime_parity.py
           git diff --check
       - name: Commit generated changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/openjarvis/security/data_boundary_audit.py docs/user-guide/data-boundary-scan.md
+          git add \
+            src/openjarvis/security/data_boundary_audit.py \
+            src/openjarvis/cli/serve.py \
+            tests/security/test_data_boundary_runtime_parity.py \
+            docs/user-guide/data-boundary-scan.md
           git diff --cached --quiet && exit 0
-          git commit -m "fix(scan): align data-boundary audit with runtime activation"
+          git commit -m "refactor(scan): share runtime cloud activation semantics"
           git push origin HEAD:fix/data-boundary-runtime-parity
