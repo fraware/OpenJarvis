@@ -1,4 +1,4 @@
-"""Finalize runtime-parity changes before rebuilding the clean branch.
+"""Polish runtime-parity changes before rebuilding the clean branch.
 
 Temporary branch-local helper. Removed before opening the upstream PR.
 """
@@ -7,14 +7,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SCANNER = ROOT / "src/openjarvis/security/data_boundary_audit.py"
-SERVE = ROOT / "src/openjarvis/cli/serve.py"
 CLI_TEST = ROOT / "tests/cli/test_scan_runtime_parity.py"
-ENGINE_TEST = ROOT / "tests/engine/test_cloud_activation.py"
 SECURITY_TEST = ROOT / "tests/security/test_data_boundary_runtime_parity.py"
-DOC = ROOT / "docs/user-guide/data-boundary-scan.md"
+OLD_HELPER = ROOT / "src/openjarvis/engine/cloud_activation.py"
+OLD_TEST = ROOT / "tests/engine/test_cloud_activation.py"
+CORE_TEST = ROOT / "tests/core/test_cloud_activation.py"
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -24,150 +23,249 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+def replace_region(
+    text: str,
+    start_marker: str,
+    end_marker: str | None,
+    replacement: str,
+    label: str,
+) -> str:
+    start = text.find(start_marker)
+    if start < 0:
+        raise RuntimeError(f"{label}: start marker not found")
+    if end_marker is None:
+        end = len(text)
+    else:
+        end = text.find(end_marker, start + len(start_marker))
+        if end < 0:
+            raise RuntimeError(f"{label}: end marker not found")
+    return text[:start] + replacement.rstrip() + "\n\n" + text[end:].lstrip("\n")
+
+
 def patch_scanner() -> None:
     text = SCANNER.read_text(encoding="utf-8")
     text = replace_once(
         text,
-        "from openjarvis.engine.cloud_activation import (\n",
-        "from openjarvis.core.cloud_activation import (\n",
-        "scanner import-safe activation import",
+        "def _nim_uses_default_vendor_host(engine: Any) -> bool:\n"
+        "    return _is_nim_engine_value(engine) and not bool(os.environ.get(\"NIM_HOST\"))\n\n\n"
+        "def _nim_uses_custom_host(engine: Any) -> bool:\n"
+        "    return _is_nim_engine_value(engine) and bool(os.environ.get(\"NIM_HOST\"))\n",
+        "def _nim_host_override_present() -> bool:\n"
+        "    \"\"\"Return whether NIM_HOST exists without inspecting its value.\"\"\"\n"
+        "    return \"NIM_HOST\" in os.environ\n\n\n"
+        "def _nim_uses_default_vendor_host(engine: Any) -> bool:\n"
+        "    return _is_nim_engine_value(engine) and not _nim_host_override_present()\n\n\n"
+        "def _nim_uses_custom_host(engine: Any) -> bool:\n"
+        "    return _is_nim_engine_value(engine) and _nim_host_override_present()\n",
+        "NIM host presence semantics",
     )
     text = replace_once(
         text,
-        '    explicit_deep_engine = str(_get(config, "deep_research.engine", "") or "").strip()\n',
-        '    explicit_deep_engine = str(\n'
-        '        _get(config, "deep_research.engine", "") or ""\n'
-        '    ).strip()\n',
-        "format explicit deep-research engine",
+        "    if os.environ.get(\"NIM_HOST\"):\n",
+        "    if _nim_host_override_present():\n",
+        "NIM audit host presence semantics",
     )
     text = replace_once(
         text,
-        "    construct a cloud engine. Values are never read or printed.\n",
+        "        active = env_name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS or any(\n"
+        "            alias in value for alias in aliases for value in active_values\n"
+        "        )\n",
+        "        active = any(\n"
+        "            alias in value for alias in aliases for value in active_values\n"
+        "        )\n",
+        "separate credential presence from server activation",
+    )
+    text = replace_once(
+        text,
+        "    Presence is sufficient because ``jarvis serve`` uses the same condition to\n"
         "    construct a cloud engine. Credential values are never emitted.\n",
-        "activation docstring accuracy",
-    )
-    text = replace_once(
-        text,
-        '            + "; values were not read or printed"\n',
-        '            + "; values were not inspected or printed"\n',
-        "server activation evidence accuracy",
-    )
-    text = replace_once(
-        text,
-        '            evidence=f"{selected}; NIM_HOST is set; value was not read or printed",\n',
-        '            evidence=(\n'
-        '                f"{selected}; NIM_HOST is set; value was not inspected or printed"\n'
-        '            ),\n',
-        "NIM endpoint evidence accuracy",
-    )
-    text = replace_once(
-        text,
-        '                "knowledge.db exists; NIM_HOST is set; value was not read "\n'
-        '                "or printed"\n',
-        '                "knowledge.db exists; NIM_HOST is set; value was not "\n'
-        '                "inspected or printed"\n',
-        "NIM knowledge evidence accuracy",
-    )
-    text = replace_once(
-        text,
-        '                "agent.context_from_memory = true; NIM_HOST is set; "\n'
-        '                "value was not read or printed"\n',
-        '                "agent.context_from_memory = true; NIM_HOST is set; "\n'
-        '                "value was not inspected or printed"\n',
-        "NIM memory evidence accuracy",
+        "    A non-empty value is sufficient because ``jarvis serve`` uses the same\n"
+        "    truthiness check. Credential values are never emitted.\n",
+        "activation helper wording",
     )
     compile(text, str(SCANNER), "exec")
     SCANNER.write_text(text, encoding="utf-8")
 
 
-def patch_serve() -> None:
-    text = SERVE.read_text(encoding="utf-8")
-    text = replace_once(
-        text,
-        "from openjarvis.engine.cloud_activation import active_server_cloud_credentials",
-        "from openjarvis.core.cloud_activation import active_server_cloud_credentials",
-        "serve import-safe activation import",
-    )
-    compile(text, str(SERVE), "exec")
-    SERVE.write_text(text, encoding="utf-8")
-
-
-def patch_tests() -> None:
-    for path in (CLI_TEST, ENGINE_TEST):
-        text = path.read_text(encoding="utf-8")
-        text = text.replace(
-            "from openjarvis.engine.cloud_activation import (",
-            "from openjarvis.core.cloud_activation import (",
+def patch_cli_test() -> None:
+    text = CLI_TEST.read_text(encoding="utf-8")
+    if "import json\n" not in text:
+        text = replace_once(
+            text,
+            "from __future__ import annotations\n\n",
+            "from __future__ import annotations\n\nimport json\n\n",
+            "CLI JSON import",
         )
-        text = text.replace(
-            "from openjarvis.security.data_boundary_audit import SERVER_AUTO_CLOUD_ENGINE_ENV_VARS",
-            "from openjarvis.core.cloud_activation import SERVER_AUTO_CLOUD_ENGINE_ENV_VARS",
-        )
-        compile(text, str(path), "exec")
-        path.write_text(text, encoding="utf-8")
+    replacement = '''def test_strict_mode_fails_when_server_cloud_engine_can_auto_activate(
+    monkeypatch, tmp_path
+):
+    for env_name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS:
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
 
-    text = SECURITY_TEST.read_text(encoding="utf-8")
-    text = replace_once(
-        text,
-        "from pathlib import Path\n\n",
-        "from pathlib import Path\nimport subprocess\nimport sys\n\n",
-        "subprocess imports",
+    config = _low_noise_config()
+    monkeypatch.setattr(
+        "openjarvis.cli.scan_cmd._load_data_boundary_config",
+        lambda: (config, tmp_path, True, "", ""),
     )
-    text = replace_once(
-        text,
-        "from openjarvis.core.config import JarvisConfig\n",
-        "from openjarvis.core.cloud_activation import SERVER_AUTO_CLOUD_ENGINE_ENV_VARS\n"
-        "from openjarvis.core.config import JarvisConfig\n",
-        "shared activation test import",
-    )
-    text = replace_once(
-        text,
-        "    SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,\n",
-        "",
-        "remove scanner re-export test import",
-    )
-    isolation_test = '''\n\ndef test_data_boundary_import_does_not_load_engine_package():
-    code = (
-        "import sys; "
-        "import openjarvis.security.data_boundary_audit; "
-        "assert 'openjarvis.engine' not in sys.modules, "
-        "'data-boundary diagnostics must stay independent of engine imports'"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        check=False,
+    monkeypatch.setattr("openjarvis.cli.scan_cmd.get_config_dir", lambda: tmp_path)
+
+    result = CliRunner().invoke(
+        scan,
+        ["--data-boundaries", "--strict", "--json"],
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    findings = {finding["id"]: finding for finding in payload["findings"]}
+    assert findings["server-cloud-engine-credential-present"]["status"] == "warn"
+    assert "canary-provider-secret" not in result.output
 '''
-    marker = "\ndef test_config_store_paths_resolve_against_jarvis_config_schema():\n"
-    text = replace_once(
+    text = replace_region(
         text,
-        marker,
-        isolation_test + marker,
-        "import isolation regression",
+        "def test_strict_mode_fails_when_server_cloud_engine_can_auto_activate(",
+        None,
+        replacement,
+        "CLI strict-mode regression",
     )
+    compile(text, str(CLI_TEST), "exec")
+    CLI_TEST.write_text(text, encoding="utf-8")
+
+
+def patch_security_test() -> None:
+    text = SECURITY_TEST.read_text(encoding="utf-8")
+
+    first = '''def test_server_auto_cloud_credential_is_warn_without_cloud_config(
+    tmp_path, monkeypatch
+):
+    _clear_boundary_env(monkeypatch)
+    config = _low_noise_config()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = _findings(report)
+
+    assert findings["server-cloud-engine-credential-present"].status == "warn"
+    assert findings["env-credential-anthropic_api_key"].status == "info"
+    rendered = str(report.to_dict(show_paths=True))
+    assert "canary-provider-secret" not in rendered
+    assert report.verdict == "cloud-capable data boundaries configured"
+'''
+    text = replace_region(
+        text,
+        "def test_server_auto_cloud_credential_is_warn_without_cloud_config(",
+        "def test_memory_plus_server_auto_cloud_credential_is_fail(",
+        first,
+        "server activation finding",
+    )
+
+    second = '''def test_memory_plus_server_auto_cloud_credential_is_fail(tmp_path, monkeypatch):
+    _clear_boundary_env(monkeypatch)
+    config = _low_noise_config()
+    config.agent.context_from_memory = True
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = _findings(report)
+
+    assert findings["memory-context-to-cloud-risk"].status == "fail"
+    assert "canary-provider-secret" not in str(report.to_dict(show_paths=True))
+    assert report.verdict == "local memory may be sent to cloud inference"
+'''
+    text = replace_region(
+        text,
+        "def test_memory_plus_server_auto_cloud_credential_is_fail(",
+        "def test_default_nim_endpoint_is_vendor_cloud(",
+        second,
+        "memory activation composition",
+    )
+
+    third = '''def test_explicit_local_deep_research_engine_overrides_server_cloud_capability(
+    tmp_path, monkeypatch
+):
+    _clear_boundary_env(monkeypatch)
+    config = _low_noise_config()
+    config.deep_research.engine = "ollama"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
+    (tmp_path / "knowledge.db").write_text("", encoding="utf-8")
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = _findings(report)
+
+    assert "knowledge-chunks-to-cloud-risk" not in findings
+    assert findings["server-cloud-engine-credential-present"].status == "warn"
+'''
+    text = replace_region(
+        text,
+        "def test_explicit_local_deep_research_engine_overrides_server_cloud_capability(",
+        "def test_knowledge_plus_custom_nim_endpoint_is_warn(",
+        third,
+        "explicit research engine precedence",
+    )
+
+    empty_override = '''def test_empty_nim_host_override_is_not_misclassified_as_vendor_default(
+    tmp_path, monkeypatch
+):
+    _clear_boundary_env(monkeypatch)
+    config = _low_noise_config()
+    config.engine.default = "nim"
+    monkeypatch.setenv("NIM_HOST", "")
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = _findings(report)
+
+    assert findings["nim-custom-endpoint-configured"].status == "warn"
+    assert "nim-vendor-cloud-default-endpoint" not in findings
+'''
+    marker = "def test_knowledge_plus_default_nim_is_fail("
+    if "def test_empty_nim_host_override_is_not_misclassified_as_vendor_default(" not in text:
+        idx = text.find(marker)
+        if idx < 0:
+            raise RuntimeError("empty NIM override insertion marker not found")
+        text = text[:idx] + empty_override.rstrip() + "\n\n\n" + text[idx:]
+
     compile(text, str(SECURITY_TEST), "exec")
     SECURITY_TEST.write_text(text, encoding="utf-8")
 
 
-def patch_docs() -> None:
-    text = DOC.read_text(encoding="utf-8")
-    text = replace_once(
-        text,
-        "reports a custom endpoint with unknown locality without reading or printing the\n"
-        "environment value.\n",
-        "reports a custom endpoint with unknown locality without interpreting or printing\n"
-        "the environment value.\n",
-        "docs endpoint wording accuracy",
-    )
-    DOC.write_text(text, encoding="utf-8")
+def move_helper_test() -> None:
+    CORE_TEST.parent.mkdir(parents=True, exist_ok=True)
+    core_test = '''from __future__ import annotations
+
+from openjarvis.core.cloud_activation import (
+    SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,
+    active_server_cloud_credentials,
+)
+
+
+def test_server_cloud_activation_declaration_is_immutable():
+    assert isinstance(SERVER_AUTO_CLOUD_ENGINE_ENV_VARS, frozenset)
+    assert "ANTHROPIC_API_KEY" in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
+    assert "GEMINI_API_KEY" in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
+
+
+def test_active_server_cloud_credentials_filters_empty_values_and_returns_names_only():
+    environ = {
+        "ANTHROPIC_API_KEY": "canary-provider-secret",
+        "GEMINI_API_KEY": "",
+        "UNRELATED": "value",
+    }
+
+    active = active_server_cloud_credentials(environ)
+
+    assert active == ("ANTHROPIC_API_KEY",)
+    assert "canary-provider-secret" not in str(active)
+'''
+    compile(core_test, str(CORE_TEST), "exec")
+    CORE_TEST.write_text(core_test, encoding="utf-8")
+    if OLD_TEST.exists():
+        OLD_TEST.unlink()
+    if OLD_HELPER.exists():
+        OLD_HELPER.unlink()
 
 
 if __name__ == "__main__":
     patch_scanner()
-    patch_serve()
-    patch_tests()
-    patch_docs()
+    patch_cli_test()
+    patch_security_test()
+    move_helper_test()
