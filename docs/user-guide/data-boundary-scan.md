@@ -43,6 +43,8 @@ OAuth token files.
 The current checks cover:
 
 - cloud-capable model provider, engine, and default model settings
+- cloud-engine auto-activation in `jarvis serve` from supported API credentials
+- NVIDIA NIM default-vendor versus custom-endpoint boundary semantics
 - local memory context injection combined with cloud-capable inference
 - traces, telemetry, learning, training, and spec-search settings
 - automatic memory service (`tools.storage.enabled` / `[memory].enabled`)
@@ -70,7 +72,10 @@ Static Deep Research targeting uses configuration only (no request overrides):
 
 Model identifiers that contain vendor names (for example `deepseek-r1` or
 `openai/gpt-oss`) are not treated as cloud-bound when their effective engine is
-explicitly local, such as Ollama.
+explicitly local, such as Ollama. NVIDIA NIM is endpoint-dependent: without
+`NIM_HOST` it uses NVIDIA's hosted API; when `NIM_HOST` is set, the scanner
+reports a custom endpoint with unknown locality without reading or printing the
+environment value.
 
 ## Status levels
 
@@ -142,7 +147,9 @@ enabled = false
 ```
 
 Also unset cloud and channel credentials from the process environment when they
-are not needed.
+are not needed. `jarvis serve` can automatically make cloud inference available
+when supported cloud-provider API credentials are present, so strict local-only
+checks treat those credentials as an active cloud-capable surface.
 
 ## Scope and non-goals
 
