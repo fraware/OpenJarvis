@@ -155,9 +155,6 @@ def save_credential(
         creds = load_credentials(path=p)
         if tool_name not in creds:
             creds[tool_name] = {}
-        tool_creds = creds.get(tool_name)
-        if tool_creds is None:
-            creds[tool_name] = {}
         creds[tool_name][key] = stripped
         _write_credentials(creds, p)
 
