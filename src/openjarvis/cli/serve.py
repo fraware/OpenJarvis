@@ -10,7 +10,10 @@ from rich.console import Console
 
 from openjarvis.cli._banner import print_banner
 from openjarvis.core.config import load_config
-from openjarvis.core.credentials import inject_credentials
+from openjarvis.core.credentials import (
+    active_server_cloud_credentials,
+    inject_credentials,
+)
 from openjarvis.core.events import EventBus
 from openjarvis.core.paths import get_config_dir
 from openjarvis.engine import (
@@ -202,16 +205,8 @@ def serve(
     # If cloud API keys are set, prepare a cloud engine. We build the
     # MultiEngine after local discovery so healthy local fallbacks such as
     # Ollama stay visible even when the configured preferred engine is MLX.
-    import os
-
     cloud_engine = None
-    _has_cloud = (
-        os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or os.environ.get("OPENROUTER_API_KEY")
-    )
+    _has_cloud = bool(active_server_cloud_credentials())
     if _has_cloud and engine_name != "cloud":
         try:
             from openjarvis.engine.cloud import CloudEngine
@@ -366,6 +361,27 @@ def serve(
 
                 if getattr(agent_cls, "accepts_tools", False):
                     agent_kwargs["max_turns"] = config.agent.max_turns
+
+                # Wire the SystemPromptBuilder so SOUL.md / MEMORY.md / USER.md
+                # reach the model on the SERVE path too. ``ask.py`` has done
+                # this since the persona system landed; ``serve.py`` never did,
+                # so an agent served over HTTP silently answered as a generic
+                # assistant while the same agent via the CLI kept its persona.
+                # Guarded so agents with specialized prompt machinery must opt
+                # in by explicitly naming and forwarding the kwarg.
+                import inspect as _inspect
+
+                if (
+                    "prompt_builder"
+                    in _inspect.signature(agent_cls.__init__).parameters
+                ):
+                    from openjarvis.prompt.builder import SystemPromptBuilder
+
+                    agent_kwargs["prompt_builder"] = SystemPromptBuilder(
+                        agent_template=config.agent.default_system_prompt or "",
+                        memory_files_config=config.memory_files,
+                        system_prompt_config=config.system_prompt,
+                    )
 
                 agent = agent_cls(engine, model_name, **agent_kwargs)
                 # Pin MCP transports to the agent's lifetime so HTTP
