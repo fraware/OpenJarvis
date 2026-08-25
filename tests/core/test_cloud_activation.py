@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from openjarvis.core.cloud_activation import (
+from openjarvis.cli._bootstrap import _KEY_TO_PROVIDER
+from openjarvis.core.credentials import (
     SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,
     active_server_cloud_credentials,
 )
@@ -23,3 +24,8 @@ def test_active_server_cloud_credentials_filters_empty_values_and_returns_names_
 
     assert active == ("ANTHROPIC_API_KEY",)
     assert "canary-provider-secret" not in str(active)
+
+
+def test_server_cloud_activation_matches_bootstrap_detection():
+    bootstrap_keys = frozenset(name for name, _provider in _KEY_TO_PROVIDER)
+    assert SERVER_AUTO_CLOUD_ENGINE_ENV_VARS == bootstrap_keys

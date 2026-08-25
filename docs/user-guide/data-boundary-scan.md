@@ -72,10 +72,10 @@ Static Deep Research targeting uses configuration only (no request overrides):
 
 Model identifiers that contain vendor names (for example `deepseek-r1` or
 `openai/gpt-oss`) are not treated as cloud-bound when their effective engine is
-explicitly local, such as Ollama. NVIDIA NIM is endpoint-dependent: without
-`NIM_HOST` it uses NVIDIA's hosted API; when `NIM_HOST` is set, the scanner
-reports a custom endpoint with unknown locality without interpreting or printing
-the environment value.
+explicitly local, such as Ollama. NVIDIA NIM is endpoint-dependent: when
+`NIM_HOST` is absent or empty it uses NVIDIA's hosted API; when `NIM_HOST` is
+non-empty, the scanner reports a custom endpoint with unknown locality without
+printing the environment value.
 
 ## Status levels
 

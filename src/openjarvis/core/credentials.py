@@ -6,6 +6,8 @@ Thread-safe writes via lock. Sets os.environ on save for immediate effect.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import logging
 import os
 import threading
@@ -63,6 +65,34 @@ TOOL_CREDENTIALS: dict[str, list[str]] = {
     "feishu": ["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
     "nostr": ["NOSTR_PRIVATE_KEY"],
 }
+
+SERVER_AUTO_CLOUD_ENGINE_ENV_VARS = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENROUTER_API_KEY",
+        TOOL_CREDENTIALS["image_generate"][0],
+    }
+)
+
+
+def active_server_cloud_credentials(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return names of non-empty credentials that enable server cloud routing.
+
+    Values are used only for truthiness and are never returned.
+    """
+    source = os.environ if environ is None else environ
+    return tuple(
+        sorted(
+            name
+            for name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
+            if source.get(name)
+        )
+    )
+
 
 
 def load_credentials(path: Path | None = None) -> dict[str, dict[str, str]]:

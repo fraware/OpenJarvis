@@ -14,10 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-from openjarvis.core.cloud_activation import (
+from openjarvis.core.credentials import (
+    TOOL_CREDENTIALS,
     active_server_cloud_credentials,
 )
-from openjarvis.core.credentials import TOOL_CREDENTIALS
 
 Status = Literal["fail", "warn", "info"]
 
@@ -1259,17 +1259,17 @@ def _primary_effective_engine(config: Any) -> str:
     )
 
 
-def _nim_host_override_present() -> bool:
-    """Return whether NIM_HOST exists without inspecting its value."""
-    return "NIM_HOST" in os.environ
+def _nim_custom_host_configured() -> bool:
+    """Return whether runtime NIM host selection uses the env override."""
+    return bool(os.environ.get("NIM_HOST"))
 
 
 def _nim_uses_default_vendor_host(engine: Any) -> bool:
-    return _is_nim_engine_value(engine) and not _nim_host_override_present()
+    return _is_nim_engine_value(engine) and not _nim_custom_host_configured()
 
 
 def _nim_uses_custom_host(engine: Any) -> bool:
-    return _is_nim_engine_value(engine) and _nim_host_override_present()
+    return _is_nim_engine_value(engine) and _nim_custom_host_configured()
 
 
 def _configured_nim_paths(config: Any) -> list[str]:
@@ -1287,15 +1287,13 @@ def _audit_nim_settings(config: Any, builder: _FindingBuilder) -> None:
     if not paths:
         return
     selected = ", ".join(f"{path} = 'nim'" for path in paths)
-    if _nim_host_override_present():
+    if _nim_custom_host_configured():
         builder.add(
             finding_id="nim-custom-endpoint-configured",
             status="warn",
             title="NVIDIA NIM uses a custom endpoint with unknown locality",
             potential_data_path="model requests -> custom NIM endpoint",
-            evidence=(
-                f"{selected}; NIM_HOST is set; value was not inspected or printed"
-            ),
+            evidence=(f"{selected}; NIM_HOST is non-empty; value was not emitted"),
             recommendation=(
                 "Verify that the custom NIM endpoint is within the intended trust "
                 "boundary before sending sensitive prompts or local context."

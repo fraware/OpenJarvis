@@ -152,9 +152,7 @@ def test_custom_nim_endpoint_is_unknown_and_redacted(tmp_path, monkeypatch):
     assert report.verdict == "custom NIM endpoint requires data-boundary review"
 
 
-def test_empty_nim_host_override_is_not_misclassified_as_vendor_default(
-    tmp_path, monkeypatch
-):
+def test_empty_nim_host_uses_vendor_default(tmp_path, monkeypatch):
     _clear_boundary_env(monkeypatch)
     config = _low_noise_config()
     config.engine.default = "nim"
@@ -163,8 +161,8 @@ def test_empty_nim_host_override_is_not_misclassified_as_vendor_default(
     report = build_data_boundary_report(config, tmp_path)
     findings = _findings(report)
 
-    assert findings["nim-custom-endpoint-configured"].status == "warn"
-    assert "nim-vendor-cloud-default-endpoint" not in findings
+    assert findings["nim-vendor-cloud-default-endpoint"].status == "warn"
+    assert "nim-custom-endpoint-configured" not in findings
 
 
 def test_knowledge_plus_default_nim_is_fail(tmp_path, monkeypatch):
