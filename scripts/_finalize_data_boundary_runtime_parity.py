@@ -1,6 +1,6 @@
-"""Polish runtime-parity changes before rebuilding the clean branch.
+"""Prepare the clean runtime-parity candidate from the staging branch.
 
-Temporary branch-local helper. Removed before opening the upstream PR.
+This helper is staging-only and removes itself after applying the guarded edits.
 """
 
 from __future__ import annotations
@@ -9,11 +9,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCANNER = ROOT / "src/openjarvis/security/data_boundary_audit.py"
-CLI_TEST = ROOT / "tests/cli/test_scan_runtime_parity.py"
-SECURITY_TEST = ROOT / "tests/security/test_data_boundary_runtime_parity.py"
-OLD_HELPER = ROOT / "src/openjarvis/engine/cloud_activation.py"
-OLD_TEST = ROOT / "tests/engine/test_cloud_activation.py"
+SERVE = ROOT / "src/openjarvis/cli/serve.py"
+CREDENTIALS = ROOT / "src/openjarvis/core/credentials.py"
 CORE_TEST = ROOT / "tests/core/test_cloud_activation.py"
+SECURITY_TEST = ROOT / "tests/security/test_data_boundary_runtime_parity.py"
+DOCS = ROOT / "docs/user-guide/data-boundary-scan.md"
+WORKFLOW = ROOT / ".github/workflows/_finalize-data-boundary-runtime-parity.yml"
+SELF = Path(__file__)
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -26,186 +28,152 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 def replace_region(
     text: str,
     start_marker: str,
-    end_marker: str | None,
+    end_marker: str,
     replacement: str,
     label: str,
 ) -> str:
     start = text.find(start_marker)
     if start < 0:
         raise RuntimeError(f"{label}: start marker not found")
-    if end_marker is None:
-        end = len(text)
-    else:
-        end = text.find(end_marker, start + len(start_marker))
-        if end < 0:
-            raise RuntimeError(f"{label}: end marker not found")
-    return text[:start] + replacement.rstrip() + "\n\n" + text[end:].lstrip("\n")
+    end = text.find(end_marker, start + len(start_marker))
+    if end < 0:
+        raise RuntimeError(f"{label}: end marker not found")
+    return text[:start] + replacement.rstrip() + "\n\n" + text[end:]
+
+
+def patch_credentials() -> None:
+    text = CREDENTIALS.read_text(encoding="utf-8")
+    if "from collections.abc import Mapping\n" not in text:
+        text = replace_once(
+            text,
+            "from __future__ import annotations\n\nimport logging\n",
+            "from __future__ import annotations\n\nfrom collections.abc import Mapping\n\nimport logging\n",
+            "credentials Mapping import",
+        )
+
+    marker = "\n\n\ndef load_credentials(path: Path | None = None) -> dict[str, dict[str, str]]:\n"
+    helper = '''
+
+SERVER_AUTO_CLOUD_ENGINE_ENV_VARS = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENROUTER_API_KEY",
+        TOOL_CREDENTIALS["image_generate"][0],
+    }
+)
+
+
+def active_server_cloud_credentials(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return names of non-empty credentials that enable server cloud routing.
+
+    Values are used only for truthiness and are never returned.
+    """
+    source = os.environ if environ is None else environ
+    return tuple(
+        sorted(
+            name
+            for name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
+            if source.get(name)
+        )
+    )
+'''
+    if "def active_server_cloud_credentials(" not in text:
+        if marker not in text:
+            raise RuntimeError("credentials helper insertion marker not found")
+        text = text.replace(marker, helper + marker, 1)
+
+    compile(text, str(CREDENTIALS), "exec")
+    CREDENTIALS.write_text(text, encoding="utf-8")
+
+
+def patch_serve() -> None:
+    text = SERVE.read_text(encoding="utf-8")
+    text = replace_once(
+        text,
+        "from openjarvis.core.credentials import inject_credentials\n",
+        "from openjarvis.core.credentials import (\n"
+        "    active_server_cloud_credentials,\n"
+        "    inject_credentials,\n"
+        ")\n",
+        "serve credential import",
+    )
+    text = replace_once(
+        text,
+        "    from openjarvis.core.cloud_activation import active_server_cloud_credentials\n\n",
+        "",
+        "serve late cloud helper import",
+    )
+    compile(text, str(SERVE), "exec")
+    SERVE.write_text(text, encoding="utf-8")
 
 
 def patch_scanner() -> None:
     text = SCANNER.read_text(encoding="utf-8")
     text = replace_once(
         text,
-        "def _nim_uses_default_vendor_host(engine: Any) -> bool:\n"
-        "    return _is_nim_engine_value(engine) and not bool(os.environ.get(\"NIM_HOST\"))\n\n\n"
-        "def _nim_uses_custom_host(engine: Any) -> bool:\n"
-        "    return _is_nim_engine_value(engine) and bool(os.environ.get(\"NIM_HOST\"))\n",
+        "from openjarvis.core.cloud_activation import (\n"
+        "    active_server_cloud_credentials,\n"
+        ")\n"
+        "from openjarvis.core.credentials import TOOL_CREDENTIALS\n",
+        "from openjarvis.core.credentials import (\n"
+        "    TOOL_CREDENTIALS,\n"
+        "    active_server_cloud_credentials,\n"
+        ")\n",
+        "scanner credential import",
+    )
+    text = replace_once(
+        text,
         "def _nim_host_override_present() -> bool:\n"
         "    \"\"\"Return whether NIM_HOST exists without inspecting its value.\"\"\"\n"
-        "    return \"NIM_HOST\" in os.environ\n\n\n"
-        "def _nim_uses_default_vendor_host(engine: Any) -> bool:\n"
-        "    return _is_nim_engine_value(engine) and not _nim_host_override_present()\n\n\n"
-        "def _nim_uses_custom_host(engine: Any) -> bool:\n"
-        "    return _is_nim_engine_value(engine) and _nim_host_override_present()\n",
-        "NIM host presence semantics",
+        "    return \"NIM_HOST\" in os.environ\n",
+        "def _nim_custom_host_configured() -> bool:\n"
+        "    \"\"\"Return whether runtime NIM host selection uses the env override.\"\"\"\n"
+        "    return bool(os.environ.get(\"NIM_HOST\"))\n",
+        "NIM runtime host semantics",
     )
-    text = replace_once(
-        text,
-        "    if os.environ.get(\"NIM_HOST\"):\n",
-        "    if _nim_host_override_present():\n",
-        "NIM audit host presence semantics",
-    )
-    text = replace_once(
-        text,
-        "        active = env_name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS or any(\n"
-        "            alias in value for alias in aliases for value in active_values\n"
-        "        )\n",
-        "        active = any(\n"
-        "            alias in value for alias in aliases for value in active_values\n"
-        "        )\n",
-        "separate credential presence from server activation",
-    )
-    text = replace_once(
-        text,
-        "    Presence is sufficient because ``jarvis serve`` uses the same condition to\n"
-        "    construct a cloud engine. Credential values are never emitted.\n",
-        "    A non-empty value is sufficient because ``jarvis serve`` uses the same\n"
-        "    truthiness check. Credential values are never emitted.\n",
-        "activation helper wording",
+    text = text.replace("_nim_host_override_present()", "_nim_custom_host_configured()")
+    text = text.replace(
+        "NIM_HOST is set; value was not inspected or printed",
+        "NIM_HOST is non-empty; value was not emitted",
     )
     compile(text, str(SCANNER), "exec")
     SCANNER.write_text(text, encoding="utf-8")
 
 
-def patch_cli_test() -> None:
-    text = CLI_TEST.read_text(encoding="utf-8")
-    if "import json\n" not in text:
-        text = replace_once(
-            text,
-            "from __future__ import annotations\n\n",
-            "from __future__ import annotations\n\nimport json\n\n",
-            "CLI JSON import",
-        )
-    replacement = '''def test_strict_mode_fails_when_server_cloud_engine_can_auto_activate(
-    monkeypatch, tmp_path
-):
-    for env_name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS:
-        monkeypatch.delenv(env_name, raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
-
-    config = _low_noise_config()
-    monkeypatch.setattr(
-        "openjarvis.cli.scan_cmd._load_data_boundary_config",
-        lambda: (config, tmp_path, True, "", ""),
-    )
-    monkeypatch.setattr("openjarvis.cli.scan_cmd.get_config_dir", lambda: tmp_path)
-
-    result = CliRunner().invoke(
-        scan,
-        ["--data-boundaries", "--strict", "--json"],
-    )
-
-    assert result.exit_code == 1
-    payload = json.loads(result.output)
-    findings = {finding["id"]: finding for finding in payload["findings"]}
-    assert findings["server-cloud-engine-credential-present"]["status"] == "warn"
-    assert "canary-provider-secret" not in result.output
-'''
-    text = replace_region(
+def patch_core_test() -> None:
+    text = CORE_TEST.read_text(encoding="utf-8")
+    text = replace_once(
         text,
-        "def test_strict_mode_fails_when_server_cloud_engine_can_auto_activate(",
-        None,
-        replacement,
-        "CLI strict-mode regression",
+        "from openjarvis.core.cloud_activation import (\n"
+        "    SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,\n"
+        "    active_server_cloud_credentials,\n"
+        ")\n",
+        "from openjarvis.cli._bootstrap import _KEY_TO_PROVIDER\n"
+        "from openjarvis.core.credentials import (\n"
+        "    SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,\n"
+        "    active_server_cloud_credentials,\n"
+        ")\n",
+        "core activation imports",
     )
-    compile(text, str(CLI_TEST), "exec")
-    CLI_TEST.write_text(text, encoding="utf-8")
+    if "def test_server_cloud_activation_matches_bootstrap_detection():" not in text:
+        text += '''
+
+
+def test_server_cloud_activation_matches_bootstrap_detection():
+    bootstrap_keys = frozenset(name for name, _provider in _KEY_TO_PROVIDER)
+    assert SERVER_AUTO_CLOUD_ENGINE_ENV_VARS == bootstrap_keys
+'''
+    compile(text, str(CORE_TEST), "exec")
+    CORE_TEST.write_text(text, encoding="utf-8")
 
 
 def patch_security_test() -> None:
     text = SECURITY_TEST.read_text(encoding="utf-8")
-
-    first = '''def test_server_auto_cloud_credential_is_warn_without_cloud_config(
-    tmp_path, monkeypatch
-):
-    _clear_boundary_env(monkeypatch)
-    config = _low_noise_config()
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
-
-    report = build_data_boundary_report(config, tmp_path)
-    findings = _findings(report)
-
-    assert findings["server-cloud-engine-credential-present"].status == "warn"
-    assert findings["env-credential-anthropic_api_key"].status == "info"
-    rendered = str(report.to_dict(show_paths=True))
-    assert "canary-provider-secret" not in rendered
-    assert report.verdict == "cloud-capable data boundaries configured"
-'''
-    text = replace_region(
-        text,
-        "def test_server_auto_cloud_credential_is_warn_without_cloud_config(",
-        "def test_memory_plus_server_auto_cloud_credential_is_fail(",
-        first,
-        "server activation finding",
-    )
-
-    second = '''def test_memory_plus_server_auto_cloud_credential_is_fail(tmp_path, monkeypatch):
-    _clear_boundary_env(monkeypatch)
-    config = _low_noise_config()
-    config.agent.context_from_memory = True
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
-
-    report = build_data_boundary_report(config, tmp_path)
-    findings = _findings(report)
-
-    assert findings["memory-context-to-cloud-risk"].status == "fail"
-    assert "canary-provider-secret" not in str(report.to_dict(show_paths=True))
-    assert report.verdict == "local memory may be sent to cloud inference"
-'''
-    text = replace_region(
-        text,
-        "def test_memory_plus_server_auto_cloud_credential_is_fail(",
-        "def test_default_nim_endpoint_is_vendor_cloud(",
-        second,
-        "memory activation composition",
-    )
-
-    third = '''def test_explicit_local_deep_research_engine_overrides_server_cloud_capability(
-    tmp_path, monkeypatch
-):
-    _clear_boundary_env(monkeypatch)
-    config = _low_noise_config()
-    config.deep_research.engine = "ollama"
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-provider-secret")
-    (tmp_path / "knowledge.db").write_text("", encoding="utf-8")
-
-    report = build_data_boundary_report(config, tmp_path)
-    findings = _findings(report)
-
-    assert "knowledge-chunks-to-cloud-risk" not in findings
-    assert findings["server-cloud-engine-credential-present"].status == "warn"
-'''
-    text = replace_region(
-        text,
-        "def test_explicit_local_deep_research_engine_overrides_server_cloud_capability(",
-        "def test_knowledge_plus_custom_nim_endpoint_is_warn(",
-        third,
-        "explicit research engine precedence",
-    )
-
-    empty_override = '''def test_empty_nim_host_override_is_not_misclassified_as_vendor_default(
-    tmp_path, monkeypatch
-):
+    replacement = '''def test_empty_nim_host_uses_vendor_default(tmp_path, monkeypatch):
     _clear_boundary_env(monkeypatch)
     config = _low_noise_config()
     config.engine.default = "nim"
@@ -214,58 +182,46 @@ def patch_security_test() -> None:
     report = build_data_boundary_report(config, tmp_path)
     findings = _findings(report)
 
-    assert findings["nim-custom-endpoint-configured"].status == "warn"
-    assert "nim-vendor-cloud-default-endpoint" not in findings
+    assert findings["nim-vendor-cloud-default-endpoint"].status == "warn"
+    assert "nim-custom-endpoint-configured" not in findings
 '''
-    marker = "def test_knowledge_plus_default_nim_is_fail("
-    if "def test_empty_nim_host_override_is_not_misclassified_as_vendor_default(" not in text:
-        idx = text.find(marker)
-        if idx < 0:
-            raise RuntimeError("empty NIM override insertion marker not found")
-        text = text[:idx] + empty_override.rstrip() + "\n\n\n" + text[idx:]
-
+    text = replace_region(
+        text,
+        "def test_empty_nim_host_override_is_not_misclassified_as_vendor_default(",
+        "def test_knowledge_plus_default_nim_is_fail(",
+        replacement,
+        "empty NIM host regression",
+    )
     compile(text, str(SECURITY_TEST), "exec")
     SECURITY_TEST.write_text(text, encoding="utf-8")
 
 
-def move_helper_test() -> None:
-    CORE_TEST.parent.mkdir(parents=True, exist_ok=True)
-    core_test = '''from __future__ import annotations
-
-from openjarvis.core.cloud_activation import (
-    SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,
-    active_server_cloud_credentials,
-)
-
-
-def test_server_cloud_activation_declaration_is_immutable():
-    assert isinstance(SERVER_AUTO_CLOUD_ENGINE_ENV_VARS, frozenset)
-    assert "ANTHROPIC_API_KEY" in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
-    assert "GEMINI_API_KEY" in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
-
-
-def test_active_server_cloud_credentials_filters_empty_values_and_returns_names_only():
-    environ = {
-        "ANTHROPIC_API_KEY": "canary-provider-secret",
-        "GEMINI_API_KEY": "",
-        "UNRELATED": "value",
-    }
-
-    active = active_server_cloud_credentials(environ)
-
-    assert active == ("ANTHROPIC_API_KEY",)
-    assert "canary-provider-secret" not in str(active)
-'''
-    compile(core_test, str(CORE_TEST), "exec")
-    CORE_TEST.write_text(core_test, encoding="utf-8")
-    if OLD_TEST.exists():
-        OLD_TEST.unlink()
-    if OLD_HELPER.exists():
-        OLD_HELPER.unlink()
+def patch_docs() -> None:
+    text = DOCS.read_text(encoding="utf-8")
+    old = (
+        "explicitly local, such as Ollama. NVIDIA NIM is endpoint-dependent: without\n"
+        "`NIM_HOST` it uses NVIDIA's hosted API; when `NIM_HOST` is set, the scanner\n"
+        "reports a custom endpoint with unknown locality without interpreting or printing\n"
+        "the environment value.\n"
+    )
+    new = (
+        "explicitly local, such as Ollama. NVIDIA NIM is endpoint-dependent: when\n"
+        "`NIM_HOST` is absent or empty it uses NVIDIA's hosted API; when `NIM_HOST` is\n"
+        "non-empty, the scanner reports a custom endpoint with unknown locality without\n"
+        "printing the environment value.\n"
+    )
+    text = replace_once(text, old, new, "NIM documentation semantics")
+    DOCS.write_text(text, encoding="utf-8")
 
 
-if __name__ == "__main__":
-    patch_scanner()
-    patch_cli_test()
-    patch_security_test()
-    move_helper_test()
+patch_credentials()
+patch_serve()
+patch_scanner()
+patch_core_test()
+patch_security_test()
+patch_docs()
+
+# Staging-only automation must not survive into the candidate tree.
+if WORKFLOW.exists():
+    WORKFLOW.unlink()
+SELF.unlink()
