@@ -94,7 +94,6 @@ def active_server_cloud_credentials(
     )
 
 
-
 def load_credentials(path: Path | None = None) -> dict[str, dict[str, str]]:
     """Load credentials, preserving malformed input as a recoverable backup."""
     p = Path(path) if path else _default_path()
@@ -155,6 +154,9 @@ def save_credential(
     with _LOCK:
         creds = load_credentials(path=p)
         if tool_name not in creds:
+            creds[tool_name] = {}
+        tool_creds = creds.get(tool_name)
+        if tool_creds is None:
             creds[tool_name] = {}
         creds[tool_name][key] = stripped
         _write_credentials(creds, p)
