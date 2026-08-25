@@ -1,0 +1,162 @@
+name: Data-boundary candidate validation
+
+on:
+  pull_request:
+    branches: [ci/data-boundary-runtime-parity-final-base]
+
+concurrency:
+  group: data-boundary-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra framework-comparison --extra server
+
+      - name: Ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: Ruff format check
+        run: uv run ruff format --check src/ tests/
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra framework-comparison --extra server
+
+      - name: Build Rust extension
+        run: uv run maturin develop --manifest-path rust/crates/openjarvis-python/Cargo.toml
+
+      - name: Run tests
+        env:
+          COVERAGE_CORE: sysmon
+        run: |
+          uv run pytest tests/ -n auto -q --tb=short -m "not live and not cloud and not hub" \
+            --cov=openjarvis \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=60
+
+      - name: Upload coverage report
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v7
+        with:
+          name: data-boundary-candidate-coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
+
+  test-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra server
+
+      - name: Verify Windows RAM detection
+        shell: bash
+        run: |
+          uv run python -c "from openjarvis.core.config import _total_ram_gb; ram = _total_ram_gb(); print(f'RAM = {ram} GB'); assert ram > 0"
+
+      - name: Run Windows-specific tests
+        shell: bash
+        run: |
+          uv run pytest tests/hardware/test_hardware_profiles.py tests/cli/test_cli.py -v -m "not live and not cloud"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and import Rust extension
+        shell: bash
+        run: |
+          uv run maturin develop --manifest-path rust/crates/openjarvis-python/Cargo.toml
+          uv run python -c "import openjarvis_rust; print('Rust extension import OK')"
+
+      - name: Smoke-test CLI
+        shell: bash
+        run: uv run jarvis --version
+
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cargo cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
