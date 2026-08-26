@@ -1,0 +1,112 @@
+name: Boundary validation
+
+on:
+  pull_request:
+    branches: [validation/boundary-parity-base]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev --extra framework-comparison --extra server
+      - run: uv run ruff check src/ tests/
+      - run: uv run ruff format --check src/ tests/
+
+  focused:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev --extra framework-comparison --extra server
+      - run: >-
+          uv run pytest -q
+          tests/core/test_cloud_activation.py
+          tests/core/test_credentials.py
+          tests/cli/test_scan_runtime_parity.py
+          tests/cli/test_scan_data_boundaries.py
+          tests/security/test_data_boundary_runtime_parity.py
+          tests/security/test_data_boundary_audit.py
+
+  full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev --extra framework-comparison --extra server
+      - run: uv run maturin develop --manifest-path rust/crates/openjarvis-python/Cargo.toml
+      - env:
+          COVERAGE_CORE: sysmon
+        run: >-
+          uv run pytest tests/ -n auto -q --tb=short
+          -m "not live and not cloud and not hub"
+          --cov=openjarvis
+          --cov-report=term-missing
+          --cov-report=xml
+          --cov-fail-under=60
+
+  race-head:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.0.1
+      - run: uv sync --extra dev --extra framework-comparison --extra server
+      - run: |
+          for i in $(seq 1 12); do
+            uv run pytest -q tests/server/test_connectors_router.py::test_disconnect_timeout_preserves_source_and_guards_reconnect
+          done
+
+  race-base:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.0.1
+      - run: uv sync --extra dev --extra framework-comparison --extra server
+      - run: |
+          for i in $(seq 1 12); do
+            uv run pytest -q tests/server/test_connectors_router.py::test_disconnect_timeout_preserves_source_and_guards_reconnect
+          done
