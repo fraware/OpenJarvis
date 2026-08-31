@@ -336,11 +336,15 @@ class TestGemmaCppConfigResolution:
 
 
 class TestGemmaCppDiscovery:
-    def test_host_map_contains_gemma_cpp(self) -> None:
-        from openjarvis.engine._discovery import _HOST_MAP
+    def test_boundary_metadata_marks_gemma_cpp_in_process(self) -> None:
+        from openjarvis.core.inference_boundaries import (
+            ENGINE_ENDPOINT_SPECS,
+            EndpointBoundary,
+        )
 
-        assert "gemma_cpp" in _HOST_MAP
-        assert _HOST_MAP["gemma_cpp"] is None
+        spec = ENGINE_ENDPOINT_SPECS["gemma_cpp"]
+        assert spec.fixed_boundary is EndpointBoundary.IN_PROCESS
+        assert spec.config_path is None
 
     def test_make_engine_passes_config(self) -> None:
         from openjarvis.core.config import GemmaCppEngineConfig, JarvisConfig
