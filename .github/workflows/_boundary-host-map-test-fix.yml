@@ -27,7 +27,7 @@ jobs:
           old = '''    def test_host_map_contains_gemma_cpp(self) -> None:\n        from openjarvis.engine._discovery import _HOST_MAP\n\n        assert "gemma_cpp" in _HOST_MAP\n        assert _HOST_MAP["gemma_cpp"] is None\n'''
           new = '''    def test_boundary_metadata_marks_gemma_cpp_in_process(self) -> None:\n        from openjarvis.core.inference_boundaries import (\n            ENGINE_ENDPOINT_SPECS,\n            EndpointBoundary,\n        )\n\n        spec = ENGINE_ENDPOINT_SPECS["gemma_cpp"]\n        assert spec.fixed_boundary is EndpointBoundary.IN_PROCESS\n        assert spec.config_path is None\n'''
           assert old in text, "expected legacy host-map test was not found"
-          assert text.count("_HOST_MAP") == 2, "unexpected additional host-map references"
+          assert text.count("_HOST_MAP") == 3, "unexpected additional host-map references"
           path.write_text(text.replace(old, new, 1), encoding="utf-8")
           PY
       - name: Install dependencies
