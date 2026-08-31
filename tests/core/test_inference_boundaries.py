@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from types import SimpleNamespace
 
 from openjarvis.core.config import JarvisConfig
@@ -23,14 +25,36 @@ def test_classify_endpoint_distinguishes_local_host_from_network() -> None:
         classify_endpoint("https://inference.example.test")
         is EndpointBoundary.EXTERNAL_NETWORK
     )
-    assert classify_endpoint("http://10.0.0.4:8000") is EndpointBoundary.EXTERNAL_NETWORK
+    assert (
+        classify_endpoint("http://10.0.0.4:8000")
+        is EndpointBoundary.EXTERNAL_NETWORK
+    )
     assert classify_endpoint("") is EndpointBoundary.UNKNOWN
 
 
-def test_fixed_engine_boundaries_are_explicit() -> None:
-    assert (
-        resolve_engine_boundary("afm").boundary is EndpointBoundary.IN_PROCESS
+def test_malformed_endpoint_is_unknown_instead_of_raising() -> None:
+    assert classify_endpoint("http://[::1") is EndpointBoundary.UNKNOWN
+
+
+def test_boundary_metadata_import_does_not_load_engine_package() -> None:
+    code = (
+        "import sys; "
+        "import openjarvis.core.inference_boundaries; "
+        "assert 'openjarvis.engine' not in sys.modules"
     )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_fixed_engine_boundaries_are_explicit() -> None:
+    assert resolve_engine_boundary("afm").boundary is EndpointBoundary.IN_PROCESS
     assert (
         resolve_engine_boundary("gemma_cpp").boundary
         is EndpointBoundary.IN_PROCESS
@@ -70,7 +94,7 @@ def test_ollama_resolution_matches_runtime_precedence() -> None:
     assert configured.source == "engine.ollama.host"
 
 
-def test_openai_compatible_config_host_precedes_environment() -> None:
+def test_compat_config_host_precedes_environment() -> None:
     config = JarvisConfig()
     config.engine.vllm.host = "https://cluster.example.test"
 
