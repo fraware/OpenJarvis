@@ -26,8 +26,11 @@ def test_classify_endpoint_distinguishes_local_host_from_network() -> None:
         is EndpointBoundary.EXTERNAL_NETWORK
     )
     assert (
-        classify_endpoint("http://10.0.0.4:8000") is EndpointBoundary.EXTERNAL_NETWORK
+        classify_endpoint("http://10.0.0.4:8000")
+        is EndpointBoundary.EXTERNAL_NETWORK
     )
+    assert classify_endpoint("http://0.0.0.0:8000") is EndpointBoundary.UNKNOWN
+    assert classify_endpoint("http://[::]:8000") is EndpointBoundary.UNKNOWN
     assert classify_endpoint("") is EndpointBoundary.UNKNOWN
 
 
@@ -105,6 +108,14 @@ def test_nim_default_and_custom_endpoint_boundaries() -> None:
     assert vendor.boundary is EndpointBoundary.VENDOR_CLOUD
     assert vendor.source == "default"
 
+    repeated_vendor = resolve_engine_boundary(
+        "nim",
+        config,
+        environ={"NIM_HOST": "https://integrate.api.nvidia.com/"},
+    )
+    assert repeated_vendor.boundary is EndpointBoundary.VENDOR_CLOUD
+    assert repeated_vendor.source == "NIM_HOST"
+
     local = resolve_engine_boundary(
         "nim", config, environ={"NIM_HOST": "http://localhost:8000"}
     )
@@ -116,6 +127,17 @@ def test_nim_default_and_custom_endpoint_boundaries() -> None:
     )
     assert remote.boundary is EndpointBoundary.EXTERNAL_NETWORK
     assert remote.source == "NIM_HOST"
+
+
+def test_runtime_resolved_engine_is_explicitly_unknown_until_instantiated() -> None:
+    resolution = resolve_engine_boundary(
+        "vllm-pearl-mining",
+        JarvisConfig(),
+        environ={},
+    )
+
+    assert resolution.boundary is EndpointBoundary.UNKNOWN
+    assert resolution.source == "runtime"
 
 
 def test_unknown_engine_is_not_silently_classified_local() -> None:
@@ -149,6 +171,18 @@ def test_nim_instance_default_vendor_endpoint_is_vendor_cloud() -> None:
     )
 
     assert boundary_from_engine_instance("nim", nim) is EndpointBoundary.VENDOR_CLOUD
+
+
+def test_runtime_resolved_instance_uses_actual_host() -> None:
+    engine = SimpleNamespace(
+        is_cloud=False,
+        _host="https://mining.example.test",
+    )
+
+    assert (
+        boundary_from_engine_instance("vllm-pearl-mining", engine)
+        is EndpointBoundary.EXTERNAL_NETWORK
+    )
 
 
 def test_unknown_instance_without_endpoint_remains_unknown() -> None:
