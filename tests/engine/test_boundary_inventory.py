@@ -26,7 +26,7 @@ def test_every_statically_registered_engine_has_boundary_metadata() -> None:
     assert not missing, f"engine boundary metadata missing for: {sorted(missing)}"
 
 
-def test_openai_compatible_defaults_match_boundary_metadata() -> None:
+def test_compatible_engine_defaults_match_boundary_metadata() -> None:
     for key, (_class_name, default_host, _api_prefix) in _ENGINES.items():
         assert ENGINE_ENDPOINT_SPECS[key].default_endpoint == default_host
 
@@ -42,5 +42,8 @@ def test_explicit_config_defaults_match_boundary_metadata() -> None:
 
 
 def test_native_engine_defaults_match_boundary_metadata() -> None:
-    assert ENGINE_ENDPOINT_SPECS["ollama"].default_endpoint == OllamaEngine._DEFAULT_HOST
+    assert (
+        ENGINE_ENDPOINT_SPECS["ollama"].default_endpoint
+        == OllamaEngine._DEFAULT_HOST
+    )
     assert ENGINE_ENDPOINT_SPECS["nim"].default_endpoint == NIMEngine._default_host
