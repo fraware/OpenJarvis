@@ -14,7 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-from openjarvis.core.credentials import TOOL_CREDENTIALS
+from openjarvis.core.credentials import (
+    TOOL_CREDENTIALS,
+    active_server_cloud_credentials,
+)
 
 Status = Literal["fail", "warn", "info"]
 
@@ -57,10 +60,12 @@ API_KEY_ENV_VARS = {
         "Cartesia cloud text-to-speech",
         {"cartesia", "text_to_speech"},
     ),
+    "DEEPGRAM_API_KEY": ("Deepgram cloud speech-to-text", {"deepgram"}),
     "DEEPSEEK_API_KEY": ("DeepSeek cloud inference", {"deepseek"}),
     "GEMINI_API_KEY": ("Google/Gemini cloud inference", {"google", "gemini"}),
     "GOOGLE_API_KEY": ("Google/Gemini cloud inference", {"google", "gemini"}),
     "MINIMAX_API_KEY": ("MiniMax cloud inference", {"minimax"}),
+    "NIM_API_KEY": ("NVIDIA NIM API authentication", {"nim"}),
     "OPENAI_API_KEY": ("OpenAI cloud inference", {"openai", "gpt"}),
     "OPENROUTER_API_KEY": ("OpenRouter cloud inference", {"openrouter"}),
     "TAVILY_API_KEY": ("Tavily web search", {"tavily", "web_search"}),
@@ -169,7 +174,7 @@ _CONFIG_STORE_PATHS: tuple[tuple[str, str, str, Status], ...] = (
     ("telemetry-db", "Telemetry database", "telemetry.db_path", "info"),
     ("audit-db", "Security audit database", "security.audit_log_path", "info"),
     ("sessions-db", "Session database", "sessions.db_path", "warn"),
-    ("agents-db", "Agent manager database", "agents.db_path", "warn"),
+    ("agents-db", "Agent manager database", "agent_manager.db_path", "warn"),
     ("optimize-db", "Optimization database", "optimize.db_path", "warn"),
     ("vault-key", "Vault encryption key", "security.vault_key_path", "warn"),
     ("scheduler-db", "Scheduler database", "scheduler.db_path", "warn"),
@@ -425,6 +430,7 @@ def build_data_boundary_report(
         )
     elif config_loaded:
         _audit_outbound_settings(config, builder)
+        _audit_nim_settings(config, builder)
         _audit_telemetry_settings(config, builder)
         _audit_memory_cloud_composition(config, builder)
         _audit_memory_service(config, builder)
@@ -461,6 +467,7 @@ def build_data_boundary_report(
 
     if root_path is not None:
         _audit_local_stores(root_path, builder, config=active_config)
+        _audit_stored_credentials_cloud_activation(root_path, builder)
         _audit_connector_credentials(root_path, builder)
         if active_config is not None:
             _audit_local_channel_credential_dirs(active_config, root_path, builder)
@@ -472,6 +479,7 @@ def build_data_boundary_report(
     )
     _audit_channel_environment_credentials(active_config, builder)
     _audit_generic_runtime_credentials(builder)
+    _audit_server_cloud_engine_activation(builder)
     if _has_cloud_api_surface(active_config, active_tools):
         _audit_frontend_storage_scope(builder)
 
@@ -697,7 +705,14 @@ def _audit_knowledge_cloud_composition(
     scan_active = _scan_chunks_surface_active(config, tools)
     knowledge_exists = _knowledge_store_exists(root)
     engine, model = _effective_deep_research_target(config)
-    cloud_target = _target_is_cloud(engine, model)
+    server_cloud_envs = _server_auto_cloud_envs()
+    explicit_deep_engine = str(_get(config, "deep_research.engine", "") or "").strip()
+    server_cloud_possible = bool(server_cloud_envs) and not explicit_deep_engine
+    nim_vendor_cloud = _nim_uses_default_vendor_host(engine)
+    nim_custom_host = _nim_uses_custom_host(engine)
+    cloud_target = (
+        _target_is_cloud(engine, model) or nim_vendor_cloud or server_cloud_possible
+    )
 
     if knowledge_exists and cloud_target:
         # Deep Research auto-installs ScanChunksTool when knowledge.db exists.
@@ -712,6 +727,15 @@ def _audit_knowledge_cloud_composition(
                 f"{_quote(model) if model else '<empty>'}"
             ),
         ]
+        if server_cloud_possible:
+            evidence_parts.append(
+                "server cloud-engine credential(s) present: "
+                + ", ".join(server_cloud_envs)
+            )
+        if nim_vendor_cloud:
+            evidence_parts.append(
+                "NIM_HOST is absent or empty; NIM uses the NVIDIA-hosted default"
+            )
         if tools & KNOWLEDGE_ENGINE_TOOLS:
             evidence_parts.append(
                 f"configured tool(s) = {_format_tools(tools & KNOWLEDGE_ENGINE_TOOLS)}"
@@ -732,6 +756,23 @@ def _audit_knowledge_cloud_composition(
             recommendation=(
                 "Use a local Deep Research engine/model when knowledge.db contains "
                 "sensitive documents, or remove cloud defaults before scanning chunks."
+            ),
+        )
+    elif knowledge_exists and nim_custom_host:
+        builder.add(
+            finding_id="knowledge-chunks-to-custom-nim-endpoint-risk",
+            status="warn",
+            title="Local knowledge chunks may reach a custom NIM endpoint",
+            potential_data_path=(
+                "local knowledge.db chunks -> Deep Research -> custom NIM endpoint"
+            ),
+            evidence=(
+                "knowledge.db exists; NIM_HOST is non-empty; value was not "
+                "inspected or printed"
+            ),
+            recommendation=(
+                "Verify the NIM endpoint trust boundary before scanning "
+                "sensitive local knowledge."
             ),
         )
     elif scan_active:
@@ -826,6 +867,7 @@ def _audit_memory_cloud_composition(
 ) -> None:
     context_from_memory = bool(_get(config, "agent.context_from_memory", False))
     active_cloud = _primary_cloud_signals(config)
+    custom_nim = _nim_uses_custom_host(_primary_effective_engine(config))
 
     if context_from_memory and active_cloud:
         builder.add(
@@ -842,6 +884,23 @@ def _audit_memory_cloud_composition(
             recommendation=(
                 "Disable agent.context_from_memory before using cloud inference, "
                 "or use local engines when indexed memory contains sensitive data."
+            ),
+        )
+    elif context_from_memory and custom_nim:
+        builder.add(
+            finding_id="memory-context-to-custom-nim-endpoint-risk",
+            status="warn",
+            title="Local memory may be injected into a custom NIM endpoint",
+            potential_data_path=(
+                "indexed local memory -> prompt context -> custom NIM endpoint"
+            ),
+            evidence=(
+                "agent.context_from_memory = true; NIM_HOST is non-empty; "
+                "value was not inspected or printed"
+            ),
+            recommendation=(
+                "Verify the custom NIM endpoint trust boundary, or disable "
+                "memory context injection for sensitive local memory."
             ),
         )
     elif context_from_memory:
@@ -1141,6 +1200,32 @@ def _audit_local_stores(
             )
 
 
+def _audit_stored_credentials_cloud_activation(
+    root: Path,
+    builder: _FindingBuilder,
+) -> None:
+    credential_store = root / "credentials.toml"
+    if not credential_store.exists():
+        return
+    builder.add(
+        finding_id="stored-credentials-cloud-activation-unknown",
+        status="warn",
+        title="Stored credentials cannot be classified for server cloud activation",
+        potential_data_path=(
+            "credentials.toml -> server credential injection -> possible cloud engine"
+        ),
+        evidence=(
+            "credentials.toml exists; credential names and values were not inspected"
+        ),
+        recommendation=(
+            "Review or remove unneeded stored credentials before strict local-only "
+            "server use."
+        ),
+        location="credentials.toml",
+        absolute_location=str(credential_store),
+    )
+
+
 def _audit_connector_credentials(root: Path, builder: _FindingBuilder) -> None:
     connectors_dir = root / "connectors"
     if not connectors_dir.exists():
@@ -1160,6 +1245,103 @@ def _audit_connector_credentials(root: Path, builder: _FindingBuilder) -> None:
             location="connectors/<redacted>.json",
             absolute_location=str(path),
         )
+
+
+def _server_auto_cloud_envs() -> list[str]:
+    """Return server cloud-engine activation keys that are present.
+
+    A non-empty value is sufficient because ``jarvis serve`` uses the same
+    truthiness check. Credential values are never emitted.
+    """
+    return list(active_server_cloud_credentials())
+
+
+def _audit_server_cloud_engine_activation(builder: _FindingBuilder) -> None:
+    active = _server_auto_cloud_envs()
+    if not active:
+        return
+    builder.add(
+        finding_id="server-cloud-engine-credential-present",
+        status="warn",
+        title="Cloud inference can be activated automatically by server credentials",
+        potential_data_path="process cloud credentials -> jarvis serve -> cloud engine",
+        evidence=(
+            "credential variable(s) set: "
+            + ", ".join(active)
+            + "; values were not inspected or printed"
+        ),
+        recommendation=(
+            "Unset these variables for strict local-only server operation, or review "
+            "the cloud engine/model routes that may become available."
+        ),
+    )
+
+
+def _is_nim_engine_value(value: Any) -> bool:
+    text = str(value or "").strip().lower().replace("-", "_")
+    return text == "nim"
+
+
+def _primary_effective_engine(config: Any) -> str:
+    return _first_nonempty(
+        _get(config, "intelligence.preferred_engine", ""),
+        _get(config, "engine.default", ""),
+        _get(config, "intelligence.provider", ""),
+    )
+
+
+def _nim_custom_host_configured() -> bool:
+    """Return whether runtime NIM host selection uses the env override."""
+    return bool(os.environ.get("NIM_HOST"))
+
+
+def _nim_uses_default_vendor_host(engine: Any) -> bool:
+    return _is_nim_engine_value(engine) and not _nim_custom_host_configured()
+
+
+def _nim_uses_custom_host(engine: Any) -> bool:
+    return _is_nim_engine_value(engine) and _nim_custom_host_configured()
+
+
+def _configured_nim_paths(config: Any) -> list[str]:
+    paths = (
+        "intelligence.provider",
+        "intelligence.preferred_engine",
+        "engine.default",
+        "deep_research.engine",
+    )
+    return [path for path in paths if _is_nim_engine_value(_get(config, path, ""))]
+
+
+def _audit_nim_settings(config: Any, builder: _FindingBuilder) -> None:
+    paths = _configured_nim_paths(config)
+    if not paths:
+        return
+    selected = ", ".join(f"{path} = 'nim'" for path in paths)
+    if _nim_custom_host_configured():
+        builder.add(
+            finding_id="nim-custom-endpoint-configured",
+            status="warn",
+            title="NVIDIA NIM uses a custom endpoint with unknown locality",
+            potential_data_path="model requests -> custom NIM endpoint",
+            evidence=(f"{selected}; NIM_HOST is non-empty; value was not emitted"),
+            recommendation=(
+                "Verify that the custom NIM endpoint is within the intended trust "
+                "boundary before sending sensitive prompts or local context."
+            ),
+        )
+        return
+    builder.add(
+        finding_id="nim-vendor-cloud-default-endpoint",
+        status="warn",
+        title="NVIDIA NIM uses the NVIDIA-hosted endpoint by default",
+        potential_data_path="model requests -> NVIDIA-hosted NIM API",
+        evidence=f"{selected}; NIM_HOST is absent or empty",
+        recommendation=(
+            "Set NIM_HOST to an explicitly reviewed self-hosted endpoint, or choose "
+            "a local engine for strict local-only operation."
+        ),
+    )
 
 
 def _audit_environment_credentials(
@@ -1560,9 +1742,15 @@ def _derive_verdict(findings: Iterable[DataBoundaryFinding]) -> str:
             "cloud-speech-backend-configured",
             "cloud-tts-backend-configured",
             "deep-research-cloud-configured",
+            "nim-vendor-cloud-default-endpoint",
+            "server-cloud-engine-credential-present",
         }
     ):
         return "cloud-capable data boundaries configured"
+    if "nim-custom-endpoint-configured" in finding_ids:
+        return "custom NIM endpoint requires data-boundary review"
+    if "stored-credentials-cloud-activation-unknown" in finding_ids:
+        return "stored credentials require server cloud-boundary review"
     if "warn" in statuses:
         return "local sensitive stores or optional data flows detected"
     return "no fail or warn findings detected"
@@ -1633,7 +1821,13 @@ def _primary_cloud_signals(config: Any) -> list[str]:
         for value in (provider, preferred_engine, default_engine)
         if _is_cloud_value(value)
     ]
+    signals.extend(
+        f"{name} activates the server cloud engine"
+        for name in _server_auto_cloud_envs()
+    )
     effective_engine = _first_nonempty(preferred_engine, default_engine, provider)
+    if _nim_uses_default_vendor_host(effective_engine):
+        signals.append("NIM uses the NVIDIA-hosted default endpoint")
     if not signals and _target_is_cloud(effective_engine, default_model):
         signals.append(str(default_model))
     return signals
