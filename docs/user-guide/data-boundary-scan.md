@@ -33,6 +33,11 @@ Absolute paths and connector file basenames are redacted by default so JSON
 reports can be pasted into issues without revealing local usernames, mount
 points, or account labels. Use `--show-paths` only for local debugging.
 
+Because `jarvis serve` loads persisted runtime credentials before engine
+discovery, a present `credentials.toml` produces an uncertainty warning. The
+scan does not read credential names or values to decide which routes the store
+could enable.
+
 ## What it checks
 
 The scan inspects configuration values, environment-variable presence, and the
@@ -60,6 +65,7 @@ The current checks cover:
   `telemetry.db`, `scheduler.db`, embeddings, skill index, `.vault_key`, and memory files
 - connector credential files under `connectors/*.json`, without reading them
 - API-key and other runtime credential environment variables (presence only)
+- persisted credential-store uncertainty for server cloud activation, without reading the store
 - a scope note for frontend credential storage when cloud/API-key surfaces exist
 
 Configured database paths (for example `traces.db_path` or `memory.db_path`)

@@ -467,6 +467,7 @@ def build_data_boundary_report(
 
     if root_path is not None:
         _audit_local_stores(root_path, builder, config=active_config)
+        _audit_stored_credentials_cloud_activation(root_path, builder)
         _audit_connector_credentials(root_path, builder)
         if active_config is not None:
             _audit_local_channel_credential_dirs(active_config, root_path, builder)
@@ -1199,6 +1200,32 @@ def _audit_local_stores(
             )
 
 
+def _audit_stored_credentials_cloud_activation(
+    root: Path,
+    builder: _FindingBuilder,
+) -> None:
+    credential_store = root / "credentials.toml"
+    if not credential_store.exists():
+        return
+    builder.add(
+        finding_id="stored-credentials-cloud-activation-unknown",
+        status="warn",
+        title="Stored credentials cannot be classified for server cloud activation",
+        potential_data_path=(
+            "credentials.toml -> server credential injection -> possible cloud engine"
+        ),
+        evidence=(
+            "credentials.toml exists; credential names and values were not inspected"
+        ),
+        recommendation=(
+            "Review or remove unneeded stored credentials before strict local-only "
+            "server use."
+        ),
+        location="credentials.toml",
+        absolute_location=str(credential_store),
+    )
+
+
 def _audit_connector_credentials(root: Path, builder: _FindingBuilder) -> None:
     connectors_dir = root / "connectors"
     if not connectors_dir.exists():
@@ -1722,6 +1749,8 @@ def _derive_verdict(findings: Iterable[DataBoundaryFinding]) -> str:
         return "cloud-capable data boundaries configured"
     if "nim-custom-endpoint-configured" in finding_ids:
         return "custom NIM endpoint requires data-boundary review"
+    if "stored-credentials-cloud-activation-unknown" in finding_ids:
+        return "stored credentials require server cloud-boundary review"
     if "warn" in statuses:
         return "local sensitive stores or optional data flows detected"
     return "no fail or warn findings detected"

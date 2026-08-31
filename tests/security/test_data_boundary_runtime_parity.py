@@ -207,6 +207,21 @@ def test_knowledge_plus_custom_nim_endpoint_is_warn(tmp_path, monkeypatch):
     assert "knowledge-chunks-to-cloud-risk" not in findings
 
 
+def test_stored_credentials_emit_server_cloud_uncertainty(tmp_path, monkeypatch):
+    _clear_boundary_env(monkeypatch)
+    config = _low_noise_config()
+    canary = "canary-stored-credential-content"
+    (tmp_path / "credentials.toml").write_text(canary, encoding="utf-8")
+
+    report = build_data_boundary_report(config, tmp_path)
+    finding = _findings(report)["stored-credentials-cloud-activation-unknown"]
+
+    assert finding.status == "warn"
+    assert finding.location == "credentials.toml"
+    assert canary not in str(report.to_dict(show_paths=True))
+    assert report.verdict == "stored credentials require server cloud-boundary review"
+
+
 def test_nim_api_key_is_specialized_and_redacted_when_nim_active(tmp_path, monkeypatch):
     _clear_boundary_env(monkeypatch)
     config = _low_noise_config()
