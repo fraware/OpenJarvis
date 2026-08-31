@@ -26,8 +26,7 @@ def test_classify_endpoint_distinguishes_local_host_from_network() -> None:
         is EndpointBoundary.EXTERNAL_NETWORK
     )
     assert (
-        classify_endpoint("http://10.0.0.4:8000")
-        is EndpointBoundary.EXTERNAL_NETWORK
+        classify_endpoint("http://10.0.0.4:8000") is EndpointBoundary.EXTERNAL_NETWORK
     )
     assert classify_endpoint("http://0.0.0.0:8000") is EndpointBoundary.UNKNOWN
     assert classify_endpoint("http://[::]:8000") is EndpointBoundary.UNKNOWN

@@ -13,7 +13,9 @@ from openjarvis.engine.nim import NIMEngine
 from openjarvis.engine.ollama import OllamaEngine
 from openjarvis.engine.openai_compat_engines import _ENGINES
 
-_ENGINE_SOURCE_DIR = Path(__file__).resolve().parents[2] / "src" / "openjarvis" / "engine"
+_ENGINE_SOURCE_DIR = (
+    Path(__file__).resolve().parents[2] / "src" / "openjarvis" / "engine"
+)
 _AVAILABLE_REGISTERED_ENGINE_KEYS = frozenset(EngineRegistry.keys())
 
 
