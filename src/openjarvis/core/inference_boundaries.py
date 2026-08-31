@@ -1,6 +1,6 @@
 """Import-safe inference endpoint trust-boundary metadata.
 
-This module contains no engine imports and performs no network I/O.  It exists so
+This module contains no engine imports and performs no network I/O. It exists so
 runtime engine selection and static data-boundary diagnostics can classify the
 same inference endpoint semantics without importing engine packages or probing
 endpoints.
@@ -143,8 +143,11 @@ def classify_endpoint(endpoint: str | None) -> EndpointBoundary:
 
     # ``urlsplit`` treats a bare host as a path. Prefix ``//`` only for parsing
     # so hostname extraction also works for values such as ``localhost:11434``.
-    parsed = urlsplit(text if "://" in text else f"//{text}")
-    hostname = parsed.hostname
+    try:
+        parsed = urlsplit(text if "://" in text else f"//{text}")
+        hostname = parsed.hostname
+    except ValueError:
+        return EndpointBoundary.UNKNOWN
     if not hostname:
         return EndpointBoundary.UNKNOWN
 
@@ -178,7 +181,7 @@ def resolve_engine_boundary(
 
     Resolution mirrors runtime precedence for known engines: fixed semantics,
     then a non-empty config host, then a non-empty environment host, then the
-    engine default.  Only the source and boundary class are returned.
+    engine default. Only the source and boundary class are returned.
     """
 
     key = str(engine_key or "").strip().lower()
@@ -226,7 +229,7 @@ def boundary_from_engine_instance(
     """Classify the endpoint actually selected by an instantiated engine.
 
     Unknown engine types remain ``UNKNOWN`` unless they explicitly mark
-    themselves cloud-bound or expose a host.  This prevents a new engine from
+    themselves cloud-bound or expose a host. This prevents a new engine from
     being silently treated as local merely because ``InferenceEngine.is_cloud``
     defaults to ``False``.
     """
