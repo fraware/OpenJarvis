@@ -24,10 +24,13 @@ class _FakeEngine(InferenceEngine):
         *,
         healthy: bool = True,
         models: list | None = None,
+        host: str | None = None,
         **kwargs,  # noqa: ANN003
     ) -> None:
         self._healthy = healthy
         self._models = models or []
+        if host is not None:
+            self._host = host
 
     def generate(self, messages, *, model, **kwargs):  # noqa: ANN001, ANN003
         return {"content": "ok", "usage": {}}
@@ -197,7 +200,7 @@ class TestGetEngine:
         assert result is None
         assert "not registered" in caplog.text
 
-    def test_default_fallback_prefers_same_engine_class(self) -> None:
+    def test_default_fallback_prefers_same_host_egress_class(self) -> None:
         _reg("bad-local", "bad-local")
         _reg("a-cloud", "a-cloud")
         _reg("z-local", "z-local")
@@ -210,10 +213,16 @@ class TestGetEngine:
 
         def _make(k, c):  # noqa: ANN001
             if k == "bad-local":
-                return _FakeEngine(healthy=False)
+                return _FakeEngine(
+                    healthy=False,
+                    host="http://localhost:9100",
+                )
             if k == "a-cloud":
                 return _Cloud(healthy=True)
-            return _FakeEngine(healthy=(k == "z-local"))
+            return _FakeEngine(
+                healthy=(k == "z-local"),
+                host="http://127.0.0.1:9200",
+            )
 
         with mock.patch(
             "openjarvis.engine._discovery._make_engine",
@@ -236,7 +245,10 @@ class TestGetEngine:
 
         def _make(k, c):  # noqa: ANN001
             if k == "bad-local":
-                return _FakeEngine(healthy=False)
+                return _FakeEngine(
+                    healthy=False,
+                    host="http://localhost:9100",
+                )
             return _Cloud(healthy=(k == "cloud-only"))
 
         with mock.patch(
@@ -247,7 +259,42 @@ class TestGetEngine:
 
         assert result is not None
         assert result[0] == "cloud-only"
-        assert "across the local/cloud boundary" in caplog.text
+        assert (
+            "across the local-host trust boundary (local-host -> vendor-cloud)"
+        ) in caplog.text
+
+    def test_nim_default_prefers_external_candidate_over_local_candidate(self) -> None:
+        _reg("nim", "nim")
+        _reg("a-local", "a-local")
+        _reg("z-remote", "z-remote")
+
+        cfg = JarvisConfig()
+        cfg.engine.default = "nim"
+
+        def _make(k, c):  # noqa: ANN001
+            if k == "nim":
+                return _FakeEngine(
+                    healthy=False,
+                    host="https://integrate.api.nvidia.com",
+                )
+            if k == "a-local":
+                return _FakeEngine(
+                    healthy=True,
+                    host="http://localhost:9300",
+                )
+            return _FakeEngine(
+                healthy=(k == "z-remote"),
+                host="https://cluster.example.test",
+            )
+
+        with mock.patch(
+            "openjarvis.engine._discovery._make_engine",
+            side_effect=_make,
+        ):
+            result = get_engine(cfg)
+
+        assert result is not None
+        assert result[0] == "z-remote"
 
     def test_skips_engine_that_cannot_serve_model(self) -> None:
         """#532: a healthy engine that can't serve the requested model is
