@@ -30,6 +30,7 @@ jobs:
           python scripts/_apply_scanner_inference_boundaries.py
           python - <<'PY'
           from pathlib import Path
+
           path = Path("src/openjarvis/security/data_boundary_audit.py")
           text = path.read_text(encoding="utf-8")
           old = '''    has_cloud = bool(_primary_cloud_signals(config))\n    evidence = "tools.storage.enabled = true"\n    if has_cloud:\n        evidence += "; cloud inference surface detected"\n'''
@@ -37,6 +38,31 @@ jobs:
           assert text.count(old) == 1
           text = text.replace(old, new, 1)
           assert "_primary_cloud_signals" not in text
+
+          wraps = {
+              '                potential_data_path="inference request context -> external network endpoint",\n': (
+                  '                potential_data_path=(\n'
+                  '                    "inference request context -> external network endpoint"\n'
+                  '                ),\n'
+              ),
+              '                potential_data_path="inference request context -> unresolved endpoint boundary",\n': (
+                  '                potential_data_path=(\n'
+                  '                    "inference request context -> unresolved endpoint boundary"\n'
+                  '                ),\n'
+              ),
+              '            potential_data_path="indexed local memory -> prompt context -> unknown endpoint",\n': (
+                  '            potential_data_path=(\n'
+                  '                "indexed local memory -> prompt context -> unknown endpoint"\n'
+                  '            ),\n'
+              ),
+              '                "Classify the inference endpoint before injecting sensitive indexed memory."\n': (
+                  '                "Classify the inference endpoint before injecting sensitive "\n'
+                  '                "indexed memory."\n'
+              ),
+          }
+          for before, after in wraps.items():
+              assert text.count(before) == 1, before
+              text = text.replace(before, after, 1)
           path.write_text(text, encoding="utf-8")
           PY
       - name: Install dependencies
