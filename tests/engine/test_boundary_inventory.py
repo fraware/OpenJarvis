@@ -43,7 +43,6 @@ def test_explicit_config_defaults_match_boundary_metadata() -> None:
 
 def test_native_engine_defaults_match_boundary_metadata() -> None:
     assert (
-        ENGINE_ENDPOINT_SPECS["ollama"].default_endpoint
-        == OllamaEngine._DEFAULT_HOST
+        ENGINE_ENDPOINT_SPECS["ollama"].default_endpoint == OllamaEngine._DEFAULT_HOST
     )
     assert ENGINE_ENDPOINT_SPECS["nim"].default_endpoint == NIMEngine._default_host

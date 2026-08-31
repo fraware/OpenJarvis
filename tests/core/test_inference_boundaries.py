@@ -26,8 +26,7 @@ def test_classify_endpoint_distinguishes_local_host_from_network() -> None:
         is EndpointBoundary.EXTERNAL_NETWORK
     )
     assert (
-        classify_endpoint("http://10.0.0.4:8000")
-        is EndpointBoundary.EXTERNAL_NETWORK
+        classify_endpoint("http://10.0.0.4:8000") is EndpointBoundary.EXTERNAL_NETWORK
     )
     assert classify_endpoint("") is EndpointBoundary.UNKNOWN
 
@@ -55,18 +54,9 @@ def test_boundary_metadata_import_does_not_load_engine_package() -> None:
 
 def test_fixed_engine_boundaries_are_explicit() -> None:
     assert resolve_engine_boundary("afm").boundary is EndpointBoundary.IN_PROCESS
-    assert (
-        resolve_engine_boundary("gemma_cpp").boundary
-        is EndpointBoundary.IN_PROCESS
-    )
-    assert (
-        resolve_engine_boundary("cloud").boundary
-        is EndpointBoundary.VENDOR_CLOUD
-    )
-    assert (
-        resolve_engine_boundary("litellm").boundary
-        is EndpointBoundary.VENDOR_CLOUD
-    )
+    assert resolve_engine_boundary("gemma_cpp").boundary is EndpointBoundary.IN_PROCESS
+    assert resolve_engine_boundary("cloud").boundary is EndpointBoundary.VENDOR_CLOUD
+    assert resolve_engine_boundary("litellm").boundary is EndpointBoundary.VENDOR_CLOUD
 
 
 def test_ollama_resolution_matches_runtime_precedence() -> None:
@@ -141,10 +131,7 @@ def test_instance_boundary_uses_actual_host() -> None:
     remote = SimpleNamespace(is_cloud=False, _host="https://cluster.example.test")
     cloud = SimpleNamespace(is_cloud=True)
 
-    assert (
-        boundary_from_engine_instance("vllm", local)
-        is EndpointBoundary.LOCAL_HOST
-    )
+    assert boundary_from_engine_instance("vllm", local) is EndpointBoundary.LOCAL_HOST
     assert (
         boundary_from_engine_instance("vllm", remote)
         is EndpointBoundary.EXTERNAL_NETWORK
@@ -161,18 +148,14 @@ def test_nim_instance_default_vendor_endpoint_is_vendor_cloud() -> None:
         _host="https://integrate.api.nvidia.com",
     )
 
-    assert (
-        boundary_from_engine_instance("nim", nim)
-        is EndpointBoundary.VENDOR_CLOUD
-    )
+    assert boundary_from_engine_instance("nim", nim) is EndpointBoundary.VENDOR_CLOUD
 
 
 def test_unknown_instance_without_endpoint_remains_unknown() -> None:
     engine = SimpleNamespace(is_cloud=False)
 
     assert (
-        boundary_from_engine_instance("new-engine", engine)
-        is EndpointBoundary.UNKNOWN
+        boundary_from_engine_instance("new-engine", engine) is EndpointBoundary.UNKNOWN
     )
 
 

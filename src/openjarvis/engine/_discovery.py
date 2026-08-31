@@ -188,8 +188,7 @@ def _boundary_transition_suffix(
         return f" with endpoint boundary {source.value} -> {target.value}"
     if source.leaves_local_host != target.leaves_local_host:
         return (
-            " across the local-host trust boundary "
-            f"({source.value} -> {target.value})"
+            f" across the local-host trust boundary ({source.value} -> {target.value})"
         )
     return f" across endpoint boundary classes ({source.value} -> {target.value})"
 
