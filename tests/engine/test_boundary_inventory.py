@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import openjarvis.engine  # noqa: F401  # trigger static engine registration
+import ast
+from pathlib import Path
+
+import openjarvis.engine  # noqa: F401  # trigger available engine registration
 from openjarvis.core.config import JarvisConfig
 from openjarvis.core.inference_boundaries import ENGINE_ENDPOINT_SPECS
 from openjarvis.core.registry import EngineRegistry
@@ -10,7 +13,8 @@ from openjarvis.engine.nim import NIMEngine
 from openjarvis.engine.ollama import OllamaEngine
 from openjarvis.engine.openai_compat_engines import _ENGINES
 
-_STATIC_REGISTERED_ENGINE_KEYS = frozenset(EngineRegistry.keys())
+_ENGINE_SOURCE_DIR = Path(__file__).resolve().parents[2] / "src" / "openjarvis" / "engine"
+_AVAILABLE_REGISTERED_ENGINE_KEYS = frozenset(EngineRegistry.keys())
 
 
 def _get_dotted(obj, dotted_path: str):  # noqa: ANN001, ANN202
@@ -20,8 +24,38 @@ def _get_dotted(obj, dotted_path: str):  # noqa: ANN001, ANN202
     return current
 
 
-def test_every_statically_registered_engine_has_boundary_metadata() -> None:
-    missing = _STATIC_REGISTERED_ENGINE_KEYS - set(ENGINE_ENDPOINT_SPECS)
+def _literal_registry_keys_from_source() -> set[str]:
+    """Find literal engine registration keys without importing optional modules."""
+
+    keys: set[str] = set()
+    for path in _ENGINE_SOURCE_DIR.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            func = node.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "EngineRegistry"
+                and func.attr in {"register", "register_value"}
+            ):
+                continue
+            first_arg = node.args[0]
+            if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                keys.add(first_arg.value)
+    return keys
+
+
+def test_every_engine_registration_surface_has_boundary_metadata() -> None:
+    source_keys = _literal_registry_keys_from_source() | set(_ENGINES)
+    missing = source_keys - set(ENGINE_ENDPOINT_SPECS)
+
+    assert not missing, f"engine boundary metadata missing for: {sorted(missing)}"
+
+
+def test_every_available_registered_engine_has_boundary_metadata() -> None:
+    missing = _AVAILABLE_REGISTERED_ENGINE_KEYS - set(ENGINE_ENDPOINT_SPECS)
 
     assert not missing, f"engine boundary metadata missing for: {sorted(missing)}"
 
