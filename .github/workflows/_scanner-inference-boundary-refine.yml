@@ -34,7 +34,7 @@ jobs:
           path = Path("src/openjarvis/security/data_boundary_audit.py")
           text = path.read_text(encoding="utf-8")
           old = '''    has_cloud = bool(_primary_cloud_signals(config))\n    evidence = "tools.storage.enabled = true"\n    if has_cloud:\n        evidence += "; cloud inference surface detected"\n'''
-          new = '''    has_outbound = any(\n        boundary.leaves_local_host is True\n        for _, boundary in _primary_inference_signals(config)\n    )\n    evidence = "tools.storage.enabled = true"\n    if has_outbound:\n        evidence += "; outbound inference surface detected"\n'''
+          new = '''    primary_boundaries = [\n        boundary for _, boundary in _primary_inference_signals(config)\n    ]\n    has_vendor_cloud = EndpointBoundary.VENDOR_CLOUD in primary_boundaries\n    has_external_endpoint = EndpointBoundary.EXTERNAL_NETWORK in primary_boundaries\n    evidence = "tools.storage.enabled = true"\n    if has_vendor_cloud:\n        evidence += "; cloud inference surface detected"\n    elif has_external_endpoint:\n        evidence += "; external inference endpoint detected"\n'''
           assert text.count(old) == 1
           text = text.replace(old, new, 1)
           assert "_primary_cloud_signals" not in text
