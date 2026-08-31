@@ -1,0 +1,77 @@
+name: Boundary host-map test fix
+
+on:
+  push:
+    branches:
+      - work/engine-boundary-host-map-test-fix
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-validate:
+    if: ${{ !contains(github.event.head_commit.message, '[host-map-test-fixed]') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - name: Replace obsolete host-map assertion
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/engine/test_gemma_cpp.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''    def test_host_map_contains_gemma_cpp(self) -> None:\n        from openjarvis.engine._discovery import _HOST_MAP\n\n        assert "gemma_cpp" in _HOST_MAP\n        assert _HOST_MAP["gemma_cpp"] is None\n'''
+          new = '''    def test_boundary_metadata_marks_gemma_cpp_in_process(self) -> None:\n        from openjarvis.core.inference_boundaries import (\n            ENGINE_ENDPOINT_SPECS,\n            EndpointBoundary,\n        )\n\n        spec = ENGINE_ENDPOINT_SPECS["gemma_cpp"]\n        assert spec.fixed_boundary is EndpointBoundary.IN_PROCESS\n        assert spec.config_path is None\n'''
+          assert old in text, "expected legacy host-map test was not found"
+          assert text.count("_HOST_MAP") == 2, "unexpected additional host-map references"
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+      - name: Install dependencies
+        run: uv sync --extra dev --extra framework-comparison --extra server
+      - name: Format and lint
+        run: |
+          uv run ruff format tests/engine/test_gemma_cpp.py
+          uv run ruff check --fix tests/engine/test_gemma_cpp.py
+          uv run ruff format tests/engine/test_gemma_cpp.py
+          uv run ruff check \
+            src/openjarvis/core/inference_boundaries.py \
+            src/openjarvis/engine/_discovery.py \
+            tests/core/test_inference_boundaries.py \
+            tests/engine/test_boundary_inventory.py \
+            tests/engine/test_discovery.py \
+            tests/engine/test_gemma_cpp.py
+          uv run ruff format --check \
+            src/openjarvis/core/inference_boundaries.py \
+            src/openjarvis/engine/_discovery.py \
+            tests/core/test_inference_boundaries.py \
+            tests/engine/test_boundary_inventory.py \
+            tests/engine/test_discovery.py \
+            tests/engine/test_gemma_cpp.py
+      - name: Targeted tests
+        run: |
+          uv run pytest -q \
+            tests/core/test_inference_boundaries.py \
+            tests/engine/test_boundary_inventory.py \
+            tests/engine/test_discovery.py \
+            tests/engine/test_gemma_cpp.py
+      - name: Static checks
+        run: |
+          python -m py_compile \
+            src/openjarvis/core/inference_boundaries.py \
+            src/openjarvis/engine/_discovery.py \
+            tests/core/test_inference_boundaries.py \
+            tests/engine/test_boundary_inventory.py \
+            tests/engine/test_discovery.py \
+            tests/engine/test_gemma_cpp.py
+          git diff --check
+      - name: Persist validated test migration
+        run: |
+          git config user.name repository-maintenance
+          git config user.email repository-maintenance@users.noreply.github.com
+          git add tests/engine/test_gemma_cpp.py
+          git commit -m "test(engine): migrate host-map assertion [host-map-test-fixed]"
+          git push
