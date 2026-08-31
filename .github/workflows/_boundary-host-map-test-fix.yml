@@ -53,7 +53,7 @@ jobs:
             tests/engine/test_gemma_cpp.py
       - name: Targeted tests
         run: |
-          uv run pytest -q \
+          uv run pytest -q -m "not live and not cloud and not hub" \
             tests/core/test_inference_boundaries.py \
             tests/engine/test_boundary_inventory.py \
             tests/engine/test_discovery.py \
