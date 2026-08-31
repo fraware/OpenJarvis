@@ -1,0 +1,37 @@
+name: Boundary refinement
+
+on:
+  push:
+    branches:
+      - fix/data-boundary-runtime-parity-next
+
+permissions:
+  contents: write
+
+jobs:
+  refine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - name: Apply refinement
+        run: python scripts/_refine_boundary_parity.py
+      - name: Format and lint
+        run: |
+          uvx ruff check --fix src/openjarvis/security/data_boundary_audit.py tests/security/test_data_boundary_runtime_parity.py
+          uvx ruff format src/openjarvis/security/data_boundary_audit.py tests/security/test_data_boundary_runtime_parity.py
+      - name: Static checks
+        run: |
+          python -m py_compile src/openjarvis/security/data_boundary_audit.py tests/security/test_data_boundary_runtime_parity.py
+          git diff --check
+      - name: Record refinement
+        run: |
+          git config user.name "repository-maintenance"
+          git config user.email "repository-maintenance@users.noreply.github.com"
+          git add docs/user-guide/data-boundary-scan.md src/openjarvis/security/data_boundary_audit.py tests/security/test_data_boundary_runtime_parity.py
+          if ! git diff --cached --quiet; then
+            git commit -m "refine boundary diagnostics"
+            git push
+          fi
