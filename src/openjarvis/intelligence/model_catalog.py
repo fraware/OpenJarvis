@@ -875,10 +875,10 @@ BUILTIN_MODELS: List[ModelSpec] = [
     # Cloud models — MiniMax
     # -----------------------------------------------------------------------
     ModelSpec(
-        model_id="MiniMax-M2.7",
-        name="MiniMax M2.7",
+        model_id="MiniMax-M3",
+        name="MiniMax M3",
         parameter_count_b=0.0,
-        context_length=204800,
+        context_length=1_000_000,
         supported_engines=("cloud",),
         provider="minimax",
         requires_api_key=True,
@@ -886,14 +886,32 @@ BUILTIN_MODELS: List[ModelSpec] = [
             "architecture": "proprietary",
             "pricing_input": 0.30,
             "pricing_output": 1.20,
-            "url": "https://www.minimax.io",
+            "pricing_long_context_input": 0.60,
+            "pricing_long_context_output": 2.40,
+            "pricing_long_context_threshold": 512_000,
+            "url": "https://platform.minimax.io/docs/api-reference/api-overview",
+        },
+    ),
+    ModelSpec(
+        model_id="MiniMax-M2.7",
+        name="MiniMax M2.7",
+        parameter_count_b=0.0,
+        context_length=204_800,
+        supported_engines=("cloud",),
+        provider="minimax",
+        requires_api_key=True,
+        metadata={
+            "architecture": "proprietary",
+            "pricing_input": 0.30,
+            "pricing_output": 1.20,
+            "url": "https://platform.minimax.io/docs/api-reference/api-overview",
         },
     ),
     ModelSpec(
         model_id="MiniMax-M2.7-highspeed",
         name="MiniMax M2.7 Highspeed",
         parameter_count_b=0.0,
-        context_length=204800,
+        context_length=204_800,
         supported_engines=("cloud",),
         provider="minimax",
         requires_api_key=True,
@@ -901,14 +919,14 @@ BUILTIN_MODELS: List[ModelSpec] = [
             "architecture": "proprietary",
             "pricing_input": 0.60,
             "pricing_output": 2.40,
-            "url": "https://www.minimax.io",
+            "url": "https://platform.minimax.io/docs/api-reference/api-overview",
         },
     ),
     ModelSpec(
         model_id="MiniMax-M2.5",
         name="MiniMax M2.5",
         parameter_count_b=0.0,
-        context_length=204800,
+        context_length=204_800,
         supported_engines=("cloud",),
         provider="minimax",
         requires_api_key=True,
@@ -916,14 +934,14 @@ BUILTIN_MODELS: List[ModelSpec] = [
             "architecture": "proprietary",
             "pricing_input": 0.30,
             "pricing_output": 1.20,
-            "url": "https://www.minimax.io",
+            "url": "https://platform.minimax.io/docs/api-reference/api-overview",
         },
     ),
     ModelSpec(
         model_id="MiniMax-M2.5-highspeed",
         name="MiniMax M2.5 Highspeed",
         parameter_count_b=0.0,
-        context_length=204800,
+        context_length=204_800,
         supported_engines=("cloud",),
         provider="minimax",
         requires_api_key=True,
@@ -931,7 +949,7 @@ BUILTIN_MODELS: List[ModelSpec] = [
             "architecture": "proprietary",
             "pricing_input": 0.60,
             "pricing_output": 2.40,
-            "url": "https://www.minimax.io",
+            "url": "https://platform.minimax.io/docs/api-reference/api-overview",
         },
     ),
     # -----------------------------------------------------------------------
@@ -995,6 +1013,55 @@ BUILTIN_MODELS: List[ModelSpec] = [
             "pricing_input": 0.50,
             "pricing_output": 3.00,
             "url": "https://ai.google.dev/gemini-api/docs/models",
+        },
+    ),
+    # -----------------------------------------------------------------------
+    # Apple Foundation Models (on-device, AFM 3)
+    #
+    # These ids are run *labels*, not selectors: the Foundation Models
+    # framework's dynamic profile picks AFM 3 Core (dense ~3B) or AFM 3 Core
+    # Advanced (20B sparse MoE, 1-4B active) from the host device, and the SDK
+    # exposes no way to choose. Requesting one label does not guarantee that
+    # variant executed -- `AppleFMEngine.describe()` records the host chip and
+    # SDK version so a run can be attributed after the fact.
+    # -----------------------------------------------------------------------
+    ModelSpec(
+        model_id="afm-3",
+        name="Apple Foundation Model 3",
+        parameter_count_b=3.0,
+        context_length=4096,
+        supported_engines=("afm", "apple_fm"),
+        provider="apple",
+        metadata={
+            "architecture": "dense",
+            "variant_selection": "device-chosen; model id is a label only",
+        },
+    ),
+    ModelSpec(
+        model_id="afm-3-core",
+        name="Apple Foundation Model 3 Core",
+        parameter_count_b=3.0,
+        context_length=4096,
+        supported_engines=("afm", "apple_fm"),
+        provider="apple",
+        metadata={
+            "architecture": "dense",
+            "variant_selection": "device-chosen; model id is a label only",
+        },
+    ),
+    ModelSpec(
+        model_id="afm-3-core-advanced",
+        name="Apple Foundation Model 3 Core Advanced",
+        # 20B total, but Instruction-Following Pruning activates only 1-4B per
+        # request; the 4B upper bound is what FLOPs accounting should use.
+        parameter_count_b=20.0,
+        active_parameter_count_b=4.0,
+        context_length=4096,
+        supported_engines=("afm", "apple_fm"),
+        provider="apple",
+        metadata={
+            "architecture": "sparse-moe",
+            "variant_selection": "device-chosen; model id is a label only",
         },
     ),
 ]

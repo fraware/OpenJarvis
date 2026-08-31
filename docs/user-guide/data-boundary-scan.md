@@ -33,6 +33,11 @@ Absolute paths and connector file basenames are redacted by default so JSON
 reports can be pasted into issues without revealing local usernames, mount
 points, or account labels. Use `--show-paths` only for local debugging.
 
+Because `jarvis serve` loads persisted runtime credentials before engine
+discovery, a present `credentials.toml` produces an uncertainty warning. The
+scan does not read credential names or values to decide which routes the store
+could enable.
+
 ## What it checks
 
 The scan inspects configuration values, environment-variable presence, and the
@@ -43,6 +48,8 @@ OAuth token files.
 The current checks cover:
 
 - cloud-capable model provider, engine, and default model settings
+- cloud-engine auto-activation in `jarvis serve` from a shared credential declaration
+- NVIDIA NIM default-vendor versus custom-endpoint boundary semantics
 - local memory context injection combined with cloud-capable inference
 - traces, telemetry, learning, training, and spec-search settings
 - automatic memory service (`tools.storage.enabled` / `[memory].enabled`)
@@ -58,6 +65,7 @@ The current checks cover:
   `telemetry.db`, `scheduler.db`, embeddings, skill index, `.vault_key`, and memory files
 - connector credential files under `connectors/*.json`, without reading them
 - API-key and other runtime credential environment variables (presence only)
+- persisted credential-store uncertainty for server cloud activation, without reading the store
 - a scope note for frontend credential storage when cloud/API-key surfaces exist
 
 Configured database paths (for example `traces.db_path` or `memory.db_path`)
@@ -70,7 +78,10 @@ Static Deep Research targeting uses configuration only (no request overrides):
 
 Model identifiers that contain vendor names (for example `deepseek-r1` or
 `openai/gpt-oss`) are not treated as cloud-bound when their effective engine is
-explicitly local, such as Ollama.
+explicitly local, such as Ollama. NVIDIA NIM is endpoint-dependent: when
+`NIM_HOST` is absent or empty it uses NVIDIA's hosted API; when `NIM_HOST` is
+non-empty, the scanner reports a custom endpoint with unknown locality without
+printing the environment value.
 
 ## Status levels
 
@@ -142,7 +153,11 @@ enabled = false
 ```
 
 Also unset cloud and channel credentials from the process environment when they
-are not needed.
+are not needed. `jarvis serve` can automatically make cloud inference available
+when supported cloud-provider API credentials are present, so strict local-only
+checks treat those credentials as an active cloud-capable surface. An explicit
+`deep_research.engine` remains authoritative for the static Deep Research
+composition check.
 
 ## Scope and non-goals
 
