@@ -7,37 +7,44 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Tuple
 
 from openjarvis.core.config import JarvisConfig
+from openjarvis.core.inference_boundaries import (
+    ENGINE_ENDPOINT_SPECS,
+    EndpointBoundary,
+    boundary_from_engine_instance,
+    resolve_engine_boundary,
+    same_host_egress_class,
+)
 from openjarvis.core.registry import EngineRegistry
 from openjarvis.engine._base import InferenceEngine
 
 logger = logging.getLogger(__name__)
 
-# Map registry keys to config host attribute (None = no host arg)
-_HOST_MAP: Dict[str, str | None] = {
-    "ollama": "ollama_host",
-    "vllm": "vllm_host",
-    "llamacpp": "llamacpp_host",
-    "sglang": "sglang_host",
-    "mlx": "mlx_host",
-    "lmstudio": "lmstudio_host",
-    "exo": "exo_host",
-    "nexa": "nexa_host",
-    "uzu": "uzu_host",
-    "apple_fm": "apple_fm_host",
-    "lemonade": "lemonade_host",
-    "cloud": None,
-    "litellm": None,
-    "gemma_cpp": None,
-    # In-process: drives the Apple FM SDK directly, so there is no host.
-    "afm": None,
-}
+
+def _configured_host_argument(key: str, config: JarvisConfig) -> str | None:
+    """Return the non-empty config host passed explicitly to an engine.
+
+    Endpoint metadata owns the mapping from engine keys to config paths so
+    discovery and boundary classification cannot drift through separate host
+    tables.
+    """
+
+    spec = ENGINE_ENDPOINT_SPECS.get(key)
+    if spec is None or spec.config_path is None:
+        return None
+    current: Any = config
+    for part in spec.config_path.split("."):
+        current = getattr(current, part, None)
+        if current is None:
+            return None
+    host = str(current or "").strip()
+    return host or None
 
 
 def _make_engine(key: str, config: JarvisConfig) -> InferenceEngine:
     """Instantiate a registered engine with the appropriate config host."""
     cls = EngineRegistry.get(key)
 
-    # LiteLLM cannot enumerate every model supported by every provider.  Its
+    # LiteLLM cannot enumerate every model supported by every provider. Its
     # list_models() contract therefore advertises the configured default
     # model, which must be supplied when discovery constructs the engine.
     if key == "litellm":
@@ -63,17 +70,15 @@ def _make_engine(key: str, config: JarvisConfig) -> InferenceEngine:
             sampling=cfg.sampling,
         )
 
-    host_attr = _HOST_MAP.get(key)
-    if host_attr is not None:
-        host = getattr(config.engine, host_attr, None)
-        if host:
-            return cls(host=host)
+    host = _configured_host_argument(key, config)
+    if host is not None:
+        return cls(host=host)
     return cls()
 
 
 def _maybe_register_mining_sidecar_engine() -> None:
     """If a mining sidecar exists with a ``vllm_endpoint``, register a derived
-    vLLM engine class pointing at it.  Idempotent.  Quiet on error.
+    vLLM engine class pointing at it. Idempotent. Quiet on error.
 
     The trigger is the *shape* of the sidecar (presence of ``vllm_endpoint``),
     not the value of its ``provider`` field — this leaves room for future
@@ -173,6 +178,21 @@ def discover_models(
     return result
 
 
+def _boundary_transition_suffix(
+    source: EndpointBoundary,
+    target: EndpointBoundary,
+) -> str:
+    if source == target:
+        return ""
+    if source is EndpointBoundary.UNKNOWN or target is EndpointBoundary.UNKNOWN:
+        return f" with endpoint boundary {source.value} -> {target.value}"
+    if source.leaves_local_host != target.leaves_local_host:
+        return (
+            f" across the local-host trust boundary ({source.value} -> {target.value})"
+        )
+    return f" across endpoint boundary classes ({source.value} -> {target.value})"
+
+
 def get_engine(
     config: JarvisConfig,
     engine_key: str | None = None,
@@ -181,8 +201,9 @@ def get_engine(
     """Get a specific engine by key, or the default with a named fallback.
 
     An explicit ``engine_key`` is authoritative and is never silently
-    substituted. Default-engine fallback prefers the same local/cloud class
-    and logs the selected replacement.
+    substituted. Default-engine fallback first prefers the same endpoint trust
+    boundary, then the same local-host egress class, and names any boundary
+    transition in the fallback warning.
 
     When *model* is given, an engine is selected only if it can actually
     serve that model (``engine.can_serve(model)``). This stops the cloud
@@ -216,13 +237,11 @@ def get_engine(
         return None
 
     default_key = config.engine.default
-    default_is_cloud: bool | None = None
+    default_boundary = resolve_engine_boundary(default_key, config).boundary
     if default_key and EngineRegistry.contains(default_key):
-        default_cls = EngineRegistry.get(default_key)
-        default_is_cloud = bool(getattr(default_cls, "is_cloud", False))
         try:
             engine = _make_engine(default_key, config)
-            default_is_cloud = bool(getattr(engine, "is_cloud", default_is_cloud))
+            default_boundary = boundary_from_engine_instance(default_key, engine)
             if _usable(engine):
                 return (default_key, engine)
         except Exception as exc:
@@ -236,23 +255,41 @@ def get_engine(
     if not candidates:
         return None
 
+    candidate_boundaries = [
+        (candidate, boundary_from_engine_instance(candidate[0], candidate[1]))
+        for candidate in candidates
+    ]
     chosen: Tuple[str, InferenceEngine] | None = None
-    if default_is_cloud is not None:
-        chosen = next(
+    chosen_boundary = EndpointBoundary.UNKNOWN
+
+    if default_boundary is not EndpointBoundary.UNKNOWN:
+        exact = next(
             (
-                candidate
-                for candidate in candidates
-                if bool(getattr(candidate[1], "is_cloud", False)) == default_is_cloud
+                item
+                for item, boundary in candidate_boundaries
+                if boundary == default_boundary
             ),
             None,
         )
-    chosen = chosen or candidates[0]
-    chosen_is_cloud = bool(getattr(chosen[1], "is_cloud", False))
-    boundary = (
-        " across the local/cloud boundary"
-        if (default_is_cloud is not None and chosen_is_cloud != default_is_cloud)
-        else ""
-    )
+        if exact is not None:
+            chosen = exact
+            chosen_boundary = default_boundary
+        else:
+            same_egress = next(
+                (
+                    (item, boundary)
+                    for item, boundary in candidate_boundaries
+                    if same_host_egress_class(default_boundary, boundary)
+                ),
+                None,
+            )
+            if same_egress is not None:
+                chosen, chosen_boundary = same_egress
+
+    if chosen is None:
+        chosen, chosen_boundary = candidate_boundaries[0]
+
+    boundary = _boundary_transition_suffix(default_boundary, chosen_boundary)
     logger.warning(
         "Default engine %r is unavailable; using %r%s",
         default_key,
