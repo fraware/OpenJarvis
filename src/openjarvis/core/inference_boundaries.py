@@ -48,6 +48,7 @@ class EngineEndpointSpec:
     default_endpoint: str | None = None
     fixed_boundary: EndpointBoundary | None = None
     default_boundary: EndpointBoundary | None = None
+    runtime_resolved: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +132,9 @@ ENGINE_ENDPOINT_SPECS: Mapping[str, EngineEndpointSpec] = {
         env_var="LEMONADE_HOST",
         default_endpoint="http://localhost:13305",
     ),
+    # Registered only when a mining sidecar supplies an endpoint. Static
+    # configuration cannot resolve it; the instantiated engine exposes _host.
+    "vllm-pearl-mining": EngineEndpointSpec(runtime_resolved=True),
 }
 
 
@@ -155,10 +159,13 @@ def classify_endpoint(endpoint: str | None) -> EndpointBoundary:
     if normalized == "localhost" or normalized.endswith(".localhost"):
         return EndpointBoundary.LOCAL_HOST
     try:
-        if ipaddress.ip_address(normalized).is_loopback:
-            return EndpointBoundary.LOCAL_HOST
+        address = ipaddress.ip_address(normalized)
     except ValueError:
-        pass
+        return EndpointBoundary.EXTERNAL_NETWORK
+    if address.is_loopback:
+        return EndpointBoundary.LOCAL_HOST
+    if address.is_unspecified:
+        return EndpointBoundary.UNKNOWN
     return EndpointBoundary.EXTERNAL_NETWORK
 
 
@@ -169,6 +176,21 @@ def _get_dotted(obj: Any, dotted_path: str) -> Any:
             return None
         current = getattr(current, part, None)
     return current
+
+
+def _classify_spec_endpoint(
+    spec: EngineEndpointSpec,
+    endpoint: str,
+) -> EndpointBoundary:
+    """Preserve a named default boundary when an override repeats its endpoint."""
+
+    if (
+        spec.default_boundary is not None
+        and spec.default_endpoint is not None
+        and endpoint.rstrip("/") == spec.default_endpoint.rstrip("/")
+    ):
+        return spec.default_boundary
+    return classify_endpoint(endpoint)
 
 
 def resolve_engine_boundary(
@@ -197,7 +219,7 @@ def resolve_engine_boundary(
         if configured:
             return EngineBoundaryResolution(
                 key,
-                classify_endpoint(configured),
+                _classify_spec_endpoint(spec, configured),
                 spec.config_path,
             )
 
@@ -207,7 +229,7 @@ def resolve_engine_boundary(
         if env_value:
             return EngineBoundaryResolution(
                 key,
-                classify_endpoint(env_value),
+                _classify_spec_endpoint(spec, env_value),
                 spec.env_var,
             )
 
@@ -219,6 +241,8 @@ def resolve_engine_boundary(
             classify_endpoint(spec.default_endpoint),
             "default",
         )
+    if spec.runtime_resolved:
+        return EngineBoundaryResolution(key, EndpointBoundary.UNKNOWN, "runtime")
     return EngineBoundaryResolution(key, EndpointBoundary.UNKNOWN, "unclassified")
 
 
@@ -244,13 +268,8 @@ def boundary_from_engine_instance(
 
     host = getattr(engine, "_host", None)
     if host:
-        if (
-            key == "nim"
-            and spec is not None
-            and spec.default_endpoint
-            and str(host).rstrip("/") == spec.default_endpoint.rstrip("/")
-        ):
-            return EndpointBoundary.VENDOR_CLOUD
+        if spec is not None:
+            return _classify_spec_endpoint(spec, str(host))
         return classify_endpoint(str(host))
 
     if spec and spec.default_boundary is not None:
