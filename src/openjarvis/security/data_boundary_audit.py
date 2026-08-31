@@ -734,7 +734,7 @@ def _audit_knowledge_cloud_composition(
             )
         if nim_vendor_cloud:
             evidence_parts.append(
-                "NIM_HOST is not set; NIM uses the NVIDIA-hosted default"
+                "NIM_HOST is absent or empty; NIM uses the NVIDIA-hosted default"
             )
         if tools & KNOWLEDGE_ENGINE_TOOLS:
             evidence_parts.append(
@@ -767,7 +767,7 @@ def _audit_knowledge_cloud_composition(
                 "local knowledge.db chunks -> Deep Research -> custom NIM endpoint"
             ),
             evidence=(
-                "knowledge.db exists; NIM_HOST is set; value was not "
+                "knowledge.db exists; NIM_HOST is non-empty; value was not "
                 "inspected or printed"
             ),
             recommendation=(
@@ -895,7 +895,7 @@ def _audit_memory_cloud_composition(
                 "indexed local memory -> prompt context -> custom NIM endpoint"
             ),
             evidence=(
-                "agent.context_from_memory = true; NIM_HOST is set; "
+                "agent.context_from_memory = true; NIM_HOST is non-empty; "
                 "value was not inspected or printed"
             ),
             recommendation=(
@@ -1336,7 +1336,7 @@ def _audit_nim_settings(config: Any, builder: _FindingBuilder) -> None:
         status="warn",
         title="NVIDIA NIM uses the NVIDIA-hosted endpoint by default",
         potential_data_path="model requests -> NVIDIA-hosted NIM API",
-        evidence=f"{selected}; NIM_HOST is not set",
+        evidence=f"{selected}; NIM_HOST is absent or empty",
         recommendation=(
             "Set NIM_HOST to an explicitly reviewed self-hosted endpoint, or choose "
             "a local engine for strict local-only operation."

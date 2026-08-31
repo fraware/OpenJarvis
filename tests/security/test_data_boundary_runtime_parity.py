@@ -161,7 +161,9 @@ def test_empty_nim_host_uses_vendor_default(tmp_path, monkeypatch):
     report = build_data_boundary_report(config, tmp_path)
     findings = _findings(report)
 
-    assert findings["nim-vendor-cloud-default-endpoint"].status == "warn"
+    finding = findings["nim-vendor-cloud-default-endpoint"]
+    assert finding.status == "warn"
+    assert "NIM_HOST is absent or empty" in finding.evidence
     assert "nim-custom-endpoint-configured" not in findings
 
 
