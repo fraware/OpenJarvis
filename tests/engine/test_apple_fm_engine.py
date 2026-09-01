@@ -593,13 +593,14 @@ class TestAfmIsTreatedAsLocal:
     """
 
     def test_data_boundary_audit_classifies_afm_as_local(self):
-        from openjarvis.security.data_boundary_audit import (
-            LOCAL_ENGINE_KEYS,
-            _target_is_cloud,
+        from openjarvis.core.inference_boundaries import (
+            EndpointBoundary,
+            resolve_engine_boundary,
         )
 
-        assert "afm" in LOCAL_ENGINE_KEYS
-        assert _target_is_cloud("afm", "afm-3-core") is False
+        resolution = resolve_engine_boundary("afm")
+        assert resolution.boundary is EndpointBoundary.IN_PROCESS
+        assert resolution.leaves_local_host is False
 
     def test_image_privacy_guard_does_not_warn_for_afm(self):
         """`jarvis ask -i photo.png --engine afm` must not claim the image
