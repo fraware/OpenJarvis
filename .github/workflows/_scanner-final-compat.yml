@@ -1,0 +1,68 @@
+name: Scanner final compatibility
+
+on:
+  push:
+    branches:
+      - work/scanner-final-compat
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: ${{ !contains(github.event.head_commit.message, '[scanner-compat-fixed]') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - name: Migrate stale scanner-local test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/engine/test_apple_fm_engine.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''    def test_data_boundary_audit_classifies_afm_as_local(self):\n        from openjarvis.security.data_boundary_audit import (\n            LOCAL_ENGINE_KEYS,\n            _target_is_cloud,\n        )\n\n        assert "afm" in LOCAL_ENGINE_KEYS\n        assert _target_is_cloud("afm", "afm-3-core") is False\n'''
+          new = '''    def test_data_boundary_audit_classifies_afm_as_local(self):\n        from openjarvis.core.inference_boundaries import (\n            EndpointBoundary,\n            resolve_engine_boundary,\n        )\n\n        resolution = resolve_engine_boundary("afm")\n        assert resolution.boundary is EndpointBoundary.IN_PROCESS\n        assert resolution.leaves_local_host is False\n'''
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+      - name: Install dependencies
+        run: uv sync --extra dev --extra framework-comparison --extra server
+      - name: Lint and format
+        run: |
+          uv run ruff check \
+            src/openjarvis/core/inference_boundaries.py \
+            src/openjarvis/security/data_boundary_audit.py \
+            tests/engine/test_apple_fm_engine.py \
+            tests/security/test_inference_endpoint_boundaries.py
+          uv run ruff format --check \
+            src/openjarvis/core/inference_boundaries.py \
+            src/openjarvis/security/data_boundary_audit.py \
+            tests/engine/test_apple_fm_engine.py \
+            tests/security/test_inference_endpoint_boundaries.py
+      - name: Targeted tests
+        run: |
+          uv run pytest -q -m "not live and not cloud and not hub" \
+            tests/core/test_inference_boundaries.py \
+            tests/engine/test_apple_fm_engine.py \
+            tests/security/test_data_boundary_audit.py \
+            tests/security/test_inference_endpoint_boundaries.py \
+            tests/cli/test_scan_data_boundaries.py
+      - name: Static checks
+        run: |
+          python -m py_compile \
+            src/openjarvis/core/inference_boundaries.py \
+            src/openjarvis/security/data_boundary_audit.py \
+            tests/engine/test_apple_fm_engine.py \
+            tests/security/test_inference_endpoint_boundaries.py
+          git diff --check
+      - name: Persist product fix
+        run: |
+          git config user.name repository-maintenance
+          git config user.email repository-maintenance@users.noreply.github.com
+          git add tests/engine/test_apple_fm_engine.py
+          git commit -m "test(engine): use shared endpoint boundary model [scanner-compat-fixed]"
+          git push
