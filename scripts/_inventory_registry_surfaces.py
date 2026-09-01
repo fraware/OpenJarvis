@@ -5,13 +5,22 @@ from collections import defaultdict
 from pathlib import Path
 
 TARGETS = {
-    "EngineRegistry",
-    "ToolRegistry",
-    "ConnectorRegistry",
+    "AgentRegistry",
+    "BenchmarkRegistry",
     "ChannelRegistry",
+    "CompressionRegistry",
+    "ConnectorRegistry",
+    "EngineRegistry",
+    "FactStoreRegistry",
+    "LearningRegistry",
+    "MemoryRegistry",
+    "MinerRegistry",
+    "ModelRegistry",
+    "RouterPolicyRegistry",
+    "SkillRegistry",
     "SpeechRegistry",
     "TTSRegistry",
-    "MinerRegistry",
+    "ToolRegistry",
 }
 
 literal: dict[str, list[tuple[str, int, str]]] = defaultdict(list)
