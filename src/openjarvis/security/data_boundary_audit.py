@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
+from openjarvis.core.cloud_activation import (
+    SERVER_AUTO_CLOUD_ENGINE_ENV_VARS,
+    active_server_cloud_credentials,
+)
 from openjarvis.core.credentials import TOOL_CREDENTIALS
 from openjarvis.core.inference_boundaries import (
     EndpointBoundary,
@@ -43,10 +47,12 @@ API_KEY_ENV_VARS = {
         "Cartesia cloud text-to-speech",
         {"cartesia", "text_to_speech"},
     ),
+    "DEEPGRAM_API_KEY": ("Deepgram cloud speech-to-text", {"deepgram"}),
     "DEEPSEEK_API_KEY": ("DeepSeek cloud inference", {"deepseek"}),
     "GEMINI_API_KEY": ("Google/Gemini cloud inference", {"google", "gemini"}),
     "GOOGLE_API_KEY": ("Google/Gemini cloud inference", {"google", "gemini"}),
     "MINIMAX_API_KEY": ("MiniMax cloud inference", {"minimax"}),
+    "NIM_API_KEY": ("NVIDIA NIM API authentication", {"nim"}),
     "OPENAI_API_KEY": ("OpenAI cloud inference", {"openai", "gpt"}),
     "OPENROUTER_API_KEY": ("OpenRouter cloud inference", {"openrouter"}),
     "TAVILY_API_KEY": ("Tavily web search", {"tavily", "web_search"}),
@@ -156,7 +162,7 @@ _CONFIG_STORE_PATHS: tuple[tuple[str, str, str, Status], ...] = (
     ("telemetry-db", "Telemetry database", "telemetry.db_path", "info"),
     ("audit-db", "Security audit database", "security.audit_log_path", "info"),
     ("sessions-db", "Session database", "sessions.db_path", "warn"),
-    ("agents-db", "Agent manager database", "agents.db_path", "warn"),
+    ("agents-db", "Agent manager database", "agent_manager.db_path", "warn"),
     ("optimize-db", "Optimization database", "optimize.db_path", "warn"),
     ("vault-key", "Vault encryption key", "security.vault_key_path", "warn"),
     ("scheduler-db", "Scheduler database", "scheduler.db_path", "warn"),
@@ -453,6 +459,7 @@ def build_data_boundary_report(
         if active_config is not None:
             _audit_local_channel_credential_dirs(active_config, root_path, builder)
             _audit_knowledge_cloud_composition(active_config, root_path, builder)
+    _audit_server_cloud_engine_activation(builder)
     _audit_environment_credentials(
         active_config,
         builder,
@@ -778,9 +785,12 @@ def _audit_knowledge_cloud_composition(
     tools = _configured_tools(config)
     scan_active = _scan_chunks_surface_active(config, tools)
     knowledge_exists = _knowledge_store_exists(root)
+    explicit_deep_engine = str(_get(config, "deep_research.engine", "") or "").strip()
+    server_cloud_envs = _server_auto_cloud_envs()
+    server_cloud_possible = bool(server_cloud_envs) and not explicit_deep_engine
     engine, model = _effective_deep_research_target(config)
     boundary, source = _target_boundary(config, engine, model)
-    outbound = boundary.leaves_local_host is True
+    outbound = boundary.leaves_local_host is True or server_cloud_possible
 
     if knowledge_exists and outbound:
         evidence_parts = [
@@ -796,6 +806,12 @@ def _audit_knowledge_cloud_composition(
             f"endpoint boundary = {boundary.value} via {source}",
             "configured endpoint value was not emitted",
         ]
+        if server_cloud_possible:
+            evidence_parts.append(
+                "jarvis serve cloud auto-activation credential(s) = "
+                + ", ".join(server_cloud_envs)
+                + "; credential values were not emitted"
+            )
         if tools & KNOWLEDGE_ENGINE_TOOLS:
             evidence_parts.append(
                 f"configured tool(s) = {_format_tools(tools & KNOWLEDGE_ENGINE_TOOLS)}"
@@ -804,7 +820,7 @@ def _audit_knowledge_cloud_composition(
             evidence_parts.append(
                 "deep research auto-installs scan_chunks when knowledge.db exists"
             )
-        is_vendor = boundary is EndpointBoundary.VENDOR_CLOUD
+        is_vendor = boundary is EndpointBoundary.VENDOR_CLOUD or server_cloud_possible
         builder.add(
             finding_id=(
                 "knowledge-chunks-to-cloud-risk"
@@ -1311,6 +1327,33 @@ def _audit_connector_credentials(root: Path, builder: _FindingBuilder) -> None:
         )
 
 
+def _server_auto_cloud_envs() -> tuple[str, ...]:
+    """Return redaction-safe names of credentials that activate server cloud routing."""
+
+    return active_server_cloud_credentials()
+
+
+def _audit_server_cloud_engine_activation(builder: _FindingBuilder) -> None:
+    active = _server_auto_cloud_envs()
+    if not active:
+        return
+    builder.add(
+        finding_id="server-cloud-engine-credential-present",
+        status="warn",
+        title="Server can automatically activate cloud inference from credentials",
+        potential_data_path="process cloud credentials -> jarvis serve -> cloud engine",
+        evidence=(
+            "server cloud auto-activation credential(s) set: "
+            + ", ".join(active)
+            + "; credential values were not emitted"
+        ),
+        recommendation=(
+            "Unset unused server cloud credentials when cloud routing is not intended, "
+            "or run the server in a local-only process environment."
+        ),
+    )
+
+
 def _audit_environment_credentials(
     config: Any | None,
     builder: _FindingBuilder,
@@ -1335,7 +1378,8 @@ def _audit_environment_credentials(
         if not os.environ.get(env_name):
             continue
         active = any(alias in value for alias in aliases for value in active_values)
-        status: Status = "warn" if active else "info"
+        server_auto = env_name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
+        status: Status = "warn" if active or server_auto else "info"
         builder.add(
             finding_id=f"env-credential-{env_name.lower()}",
             status=status,
@@ -1733,6 +1777,7 @@ def _derive_verdict(findings: Iterable[DataBoundaryFinding]) -> str:
             "cloud-speech-backend-configured",
             "cloud-tts-backend-configured",
             "deep-research-cloud-configured",
+            "server-cloud-engine-credential-present",
         }
     ):
         return "cloud-capable data boundaries configured"
@@ -1829,6 +1874,8 @@ def _primary_inference_signals(
         boundary, _ = _target_boundary(config, effective_engine, default_model)
         if boundary is not EndpointBoundary.UNKNOWN:
             signals.append(("intelligence.default_model", boundary))
+    for env_name in _server_auto_cloud_envs():
+        signals.append((f"{env_name} via jarvis serve", EndpointBoundary.VENDOR_CLOUD))
     return signals
 
 
