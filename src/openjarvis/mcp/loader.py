@@ -48,6 +48,11 @@ def load_mcp_tools_from_config(
     own include/exclude filter. Pass the caller's `--tools`/`enabled`
     list to honour CLI scoping; pass ``None`` to take every tool.
 
+    ``config_dir`` enables the same inline-JSON-or-file resolution used by
+    the main system builder. Callers loading a JarvisConfig should pass its
+    recorded source directory so relative MCP config references resolve from
+    the configuration file rather than the process working directory.
+
     Returns ``([], [])`` when mcp is disabled or no servers are
     configured — no exception, no warning.
     """

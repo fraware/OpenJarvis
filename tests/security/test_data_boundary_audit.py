@@ -807,6 +807,16 @@ def test_channel_send_produces_outbound_warn(tmp_path, tool_name):
     assert "telegram-secret-channel" not in str(payload)
 
 
+def test_empty_inline_mcp_server_list_has_no_surface_finding(tmp_path):
+    config = _low_noise_config()
+    config.tools.mcp.enabled = True
+    config.tools.mcp.servers = "[]"
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    assert "mcp-servers-configured" not in {item.id for item in report.findings}
+
+
 def test_mcp_inline_transports_are_classified_without_values(tmp_path):
     config = _low_noise_config()
     config.tools.mcp.enabled = True

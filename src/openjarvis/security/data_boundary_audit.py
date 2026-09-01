@@ -1209,6 +1209,8 @@ def _audit_tool_surfaces(config: Any, builder: _FindingBuilder) -> None:
     mcp_servers = str(_get(config, "tools.mcp.servers", "") or "").strip()
     if mcp_enabled and mcp_servers:
         inspection = inspect_mcp_servers(mcp_servers)
+        if inspection.source is MCPConfigSource.INLINE and not inspection.servers:
+            return
         if inspection.source is MCPConfigSource.FILE_REFERENCE:
             evidence = (
                 "tools.mcp.enabled = true; tools.mcp.servers is a file reference; "

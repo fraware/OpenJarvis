@@ -65,6 +65,14 @@ Configured database paths (for example `traces.db_path` or `memory.db_path`)
 are resolved from config when set, not only the default locations under the
 OpenJarvis home directory.
 
+For inline MCP server configuration, the scan classifies configured transports
+as local-host HTTP, external-network HTTP, unresolved HTTP, stdio subprocess, or
+invalid without emitting server names, endpoints, tokens, commands, or arguments.
+If `tools.mcp.servers` references a JSON file, the scan reports the reference as
+unresolved and deliberately does not open that file; runtime paths may resolve it
+when they actually construct MCP clients. An inline empty array creates no MCP
+server-surface finding.
+
 Static Deep Research targeting uses configuration only (no request overrides):
 `deep_research.engine` or `engine.default`, and `deep_research.model` or
 `server.model` or `intelligence.default_model`. When no explicit
