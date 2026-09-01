@@ -192,3 +192,17 @@ def test_external_optimizer_endpoint_activates_security_surface(tmp_path) -> Non
     )
     assert findings["security-local-engine-bypass-enabled"].status == "warn"
     assert "optimizer.example.test" not in str(report.to_dict(show_paths=True))
+
+
+def test_runtime_resolved_hyphenated_engine_keeps_runtime_source(tmp_path) -> None:
+    config = _config()
+    config.engine.default = "vllm-pearl-mining"
+    config.agent.context_from_memory = True
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = _findings(report)
+
+    endpoint = findings["inference-endpoint-boundary-unknown-engine-default"]
+    assert endpoint.status == "warn"
+    assert "via runtime" in endpoint.evidence
+    assert findings["memory-context-to-unknown-inference-boundary"].status == "warn"

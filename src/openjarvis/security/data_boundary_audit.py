@@ -1,9 +1,9 @@
 """Application data-boundary diagnostics for OpenJarvis.
 
-The report builder intentionally limits itself to configuration values,
-environment-key presence, and file existence. It never reads private user
-content from connector credential files, memory files, trace databases, logs, or
-other local runtime stores.
+The report builder limits itself to configuration values, endpoint-host settings
+used only for redaction-safe boundary classification, credential-key presence,
+and file existence. It never reads private user content from connector credential
+files, memory files, trace databases, logs, or other local runtime stores.
 """
 
 from __future__ import annotations
@@ -117,7 +117,8 @@ RUNTIME_CREDENTIAL_ENV_KEYS = {
 }
 
 # Specialized findings carry provider/channel semantics; remaining keys get a
-# presence-only generic finding. Values are never read or printed.
+# presence-only generic finding. Credential values are checked only for presence
+# and never emitted.
 _SPECIALIZED_CREDENTIAL_ENV_VARS = (
     set(API_KEY_ENV_VARS)
     | set(CHANNEL_SECRET_ENV_VARS)
@@ -1340,7 +1341,7 @@ def _audit_environment_credentials(
             status=status,
             title=f"Cloud/API credential available in environment: {env_name}",
             potential_data_path=f"process environment -> {purpose}",
-            evidence=f"{env_name} is set; value was not read or printed",
+            evidence=f"{env_name} is set; value was not interpreted or printed",
             recommendation=(
                 "Unset this variable for local-only operation. The audit reports "
                 "only presence and never prints credential values."
@@ -1459,7 +1460,7 @@ def _audit_channel_environment_credentials(
             status=status,
             title=f"Channel secret available in environment: {env_name}",
             potential_data_path=f"process environment -> {purpose}",
-            evidence=f"{env_name} is set; value was not read or printed",
+            evidence=f"{env_name} is set; value was not interpreted or printed",
             recommendation=(
                 "Unset channel secrets when external messaging is not in use. "
                 "The audit reports only presence and never prints secret values."
@@ -1475,7 +1476,7 @@ def _audit_channel_environment_credentials(
             status=status,
             title=f"Channel endpoint or identifier in environment: {env_name}",
             potential_data_path=f"process environment -> {purpose}",
-            evidence=f"{env_name} is set; value was not read or printed",
+            evidence=f"{env_name} is set; value was not interpreted or printed",
             recommendation=(
                 "Unset channel endpoint variables when external messaging is not "
                 "in use. The audit reports only presence."
@@ -1549,7 +1550,7 @@ def _audit_generic_runtime_credentials(builder: _FindingBuilder) -> None:
             status="info",
             title=f"Runtime credential available in environment: {env_name}",
             potential_data_path=f"process environment -> {env_name}",
-            evidence=f"{env_name} is set; value was not read or printed",
+            evidence=f"{env_name} is set; value was not interpreted or printed",
             recommendation=(
                 "Unset unused runtime credentials. The audit reports only presence "
                 "and never prints credential values."
@@ -1785,7 +1786,7 @@ def _target_boundary(
     model: Any,
 ) -> tuple[EndpointBoundary, str]:
     """Resolve an inference target without emitting configured endpoint values."""
-    engine_text = str(engine or "").strip().lower().replace("-", "_")
+    engine_text = str(engine or "").strip().lower()
     if engine_text:
         resolution = resolve_engine_boundary(engine_text, config)
         if resolution.boundary is not EndpointBoundary.UNKNOWN:
