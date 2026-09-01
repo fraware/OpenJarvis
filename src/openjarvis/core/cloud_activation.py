@@ -29,8 +29,9 @@ def active_server_cloud_credentials(
     """Return sorted names of credentials that can activate server cloud routing."""
 
     environment = os.environ if environ is None else environ
-    return tuple(
-        sorted(
-            name for name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS if environment.get(name)
-        )
-    )
+    active_names = [
+        name
+        for name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
+        if environment.get(name)
+    ]
+    return tuple(sorted(active_names))
