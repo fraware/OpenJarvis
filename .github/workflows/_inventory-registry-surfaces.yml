@@ -1,0 +1,20 @@
+name: Inventory registry surfaces
+
+on:
+  push:
+    branches:
+      - work/security-surface-inventory
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Static registry inventory
+        run: python scripts/_inventory_registry_surfaces.py
