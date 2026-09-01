@@ -80,6 +80,46 @@ class TestLoaderEarlyReturns:
         assert any("parse MCP servers config" in r.message for r in caplog.records)
 
 
+class TestLoaderConfigResolution:
+    def test_file_backed_config_resolves_from_config_dir(
+        self, _mock_mcp_stack, tmp_path
+    ):
+        from openjarvis.mcp.loader import load_mcp_tools_from_config
+
+        servers_file = tmp_path / "mcp-servers.json"
+        servers_file.write_text(
+            '[{"name":"file-backed","url":"http://localhost:9583/mcp"}]',
+            encoding="utf-8",
+        )
+        cfg = _make_mcp_cfg(enabled=True, servers="mcp-servers.json")
+
+        load_mcp_tools_from_config(cfg, config_dir=tmp_path)
+
+        _mock_mcp_stack["http"].assert_called_once_with(
+            url="http://localhost:9583/mcp",
+            token=None,
+        )
+
+    def test_url_wins_over_command_in_runtime_loader(self, _mock_mcp_stack):
+        from openjarvis.mcp.loader import load_mcp_tools_from_config
+
+        cfg = _make_mcp_cfg(
+            enabled=True,
+            servers=[
+                {
+                    "url": "http://localhost:9583/mcp",
+                    "command": "must-not-run",
+                    "args": ["must-not-run-either"],
+                }
+            ],
+        )
+
+        load_mcp_tools_from_config(cfg)
+
+        _mock_mcp_stack["http"].assert_called_once()
+        _mock_mcp_stack["stdio"].assert_not_called()
+
+
 class TestLoaderTokenPlumbing:
     def test_token_passed_to_streamable_http(self, _mock_mcp_stack):
         """Regression for #461 — token in cfg → StreamableHTTPTransport(token=...)."""

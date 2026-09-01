@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
@@ -34,6 +35,7 @@ def load_mcp_tools_from_config(
     mcp_cfg: Any,
     *,
     allowed_names: Optional[set[str]] = None,
+    config_dir: Path | None = None,
 ) -> tuple[list["BaseTool"], list["MCPClient"]]:
     """Load tools from every server in ``mcp_cfg.servers``.
 
@@ -57,10 +59,17 @@ def load_mcp_tools_from_config(
         return [], []
 
     try:
-        server_list = (
-            json.loads(servers_blob) if isinstance(servers_blob, str) else servers_blob
-        )
-    except (json.JSONDecodeError, TypeError) as exc:
+        if isinstance(servers_blob, str) and config_dir is not None:
+            from openjarvis.core.config import resolve_mcp_servers
+
+            server_list = resolve_mcp_servers(servers_blob, Path(config_dir))
+        else:
+            server_list = (
+                json.loads(servers_blob)
+                if isinstance(servers_blob, str)
+                else servers_blob
+            )
+    except (json.JSONDecodeError, OSError, UnicodeError, ValueError, TypeError) as exc:
         logger.warning("Failed to parse MCP servers config: %s", exc)
         return [], []
     if not isinstance(server_list, list):
@@ -73,6 +82,7 @@ def load_mcp_tools_from_config(
     # Imported lazily so that `openjarvis.mcp.loader` can be imported
     # cheaply from CLI startup paths without dragging in the heavy MCP
     # client stack until something actually wants to discover tools.
+    from openjarvis.core.mcp_boundaries import MCPTransportKind, mcp_transport_kind
     from openjarvis.mcp.client import MCPClient
     from openjarvis.mcp.transport import StdioTransport, StreamableHTTPTransport
     from openjarvis.tools.mcp_adapter import MCPToolProvider
@@ -89,9 +99,10 @@ def load_mcp_tools_from_config(
             command = cfg.get("command", "")
             args = cfg.get("args", [])
 
-            if url:
+            transport_kind = mcp_transport_kind(cfg)
+            if transport_kind is MCPTransportKind.STREAMABLE_HTTP:
                 transport = StreamableHTTPTransport(url=url, token=token)
-            elif command:
+            elif transport_kind is MCPTransportKind.STDIO:
                 transport = StdioTransport(command=[command] + args)
             else:
                 logger.warning(

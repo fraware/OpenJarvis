@@ -82,9 +82,7 @@ def test_inspect_inline_servers_classifies_without_exposing_values() -> None:
 
 
 def test_single_inline_object_is_normalized() -> None:
-    inspection = inspect_mcp_servers(
-        '{"name":"one","url":"http://localhost:8123/mcp"}'
-    )
+    inspection = inspect_mcp_servers('{"name":"one","url":"http://localhost:8123/mcp"}')
 
     assert inspection.source is MCPConfigSource.INLINE
     assert len(inspection.servers) == 1

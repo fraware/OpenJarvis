@@ -693,6 +693,7 @@ def _get_mcp_tools_locked(
     if not app_config.tools.mcp.enabled or not app_config.tools.mcp.servers:
         return openai_tools, adapters_by_name
 
+    from openjarvis.core.mcp_boundaries import MCPTransportKind, mcp_transport_kind
     from openjarvis.mcp.client import MCPClient
     from openjarvis.mcp.transport import StdioTransport, StreamableHTTPTransport
     from openjarvis.tools.mcp_adapter import MCPToolProvider
@@ -717,9 +718,10 @@ def _get_mcp_tools_locked(
 
         client = None
         try:
-            if url:
+            transport_kind = mcp_transport_kind(cfg)
+            if transport_kind is MCPTransportKind.STREAMABLE_HTTP:
                 transport = StreamableHTTPTransport(url=url, token=token)
-            elif command:
+            elif transport_kind is MCPTransportKind.STDIO:
                 transport = StdioTransport(command=[command] + args)
             else:
                 logger.warning(
