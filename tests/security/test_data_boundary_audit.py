@@ -366,17 +366,18 @@ def test_google_env_warns_when_gemini_provider_active(tmp_path, monkeypatch):
     assert findings["env-credential-google_api_key"].status == "warn"
 
 
-def test_environment_credentials_report_presence_only(tmp_path, monkeypatch):
+def test_server_cloud_environment_credential_warns_and_redacts(tmp_path, monkeypatch):
     config = _low_noise_config()
     monkeypatch.setenv("OPENAI_API_KEY", "secret-key")
 
     report = build_data_boundary_report(config, tmp_path)
 
     findings = {finding.id: finding for finding in report.findings}
-    finding = findings["env-credential-openai_api_key"]
-    assert finding.status == "info"
-    assert "OPENAI_API_KEY is set" in finding.evidence
+    assert findings["env-credential-openai_api_key"].status == "warn"
+    assert findings["server-cloud-engine-credential-present"].status == "warn"
+    assert "OPENAI_API_KEY is set" in findings["env-credential-openai_api_key"].evidence
     assert "secret-key" not in str(report.to_dict(show_paths=True))
+    assert report.verdict == "cloud-capable data boundaries configured"
 
 
 def test_server_all_interfaces_is_warn(tmp_path):
@@ -1370,3 +1371,93 @@ class TestWebSearchDestination:
                     assert labels[resolved] in _web_search_destination(), (
                         f"tavily={tavily} youcom={youcom} engine={engine}"
                     )
+
+
+def test_server_cloud_key_runtime_parity_regressions(tmp_path, monkeypatch):
+    config = _low_noise_config()
+    config.agent.context_from_memory = True
+    monkeypatch.setenv("OPENROUTER_API_KEY", "canary-server-cloud-secret")
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = {finding.id: finding for finding in report.findings}
+
+    assert findings["server-cloud-engine-credential-present"].status == "warn"
+    assert findings["memory-context-to-cloud-risk"].status == "fail"
+    assert report.verdict == "local memory may be sent to cloud inference"
+    assert "canary-server-cloud-secret" not in str(report.to_dict(show_paths=True))
+
+
+def test_knowledge_can_reach_server_cloud_engine_without_explicit_research_override(
+    tmp_path, monkeypatch
+):
+    config = _low_noise_config()
+    config.engine.default = "ollama"
+    config.deep_research.engine = ""
+    (tmp_path / "knowledge.db").write_text("", encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-knowledge-secret")
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = {finding.id: finding for finding in report.findings}
+
+    assert findings["knowledge-chunks-to-cloud-risk"].status == "fail"
+    assert "canary-knowledge-secret" not in str(report.to_dict(show_paths=True))
+
+
+def test_explicit_local_research_engine_blocks_server_cloud_knowledge_path(
+    tmp_path, monkeypatch
+):
+    config = _low_noise_config()
+    config.deep_research.engine = "ollama"
+    (tmp_path / "knowledge.db").write_text("", encoding="utf-8")
+    monkeypatch.setenv("GOOGLE_API_KEY", "canary-explicit-local-secret")
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = {finding.id: finding for finding in report.findings}
+
+    assert "knowledge-chunks-to-cloud-risk" not in findings
+    assert findings["server-cloud-engine-credential-present"].status == "warn"
+    assert "canary-explicit-local-secret" not in str(report.to_dict(show_paths=True))
+
+
+@pytest.mark.parametrize(
+    ("env_name", "finding_id"),
+    [
+        ("DEEPGRAM_API_KEY", "env-credential-deepgram_api_key"),
+        ("NIM_API_KEY", "env-credential-nim_api_key"),
+    ],
+)
+def test_specialized_runtime_credentials_are_redacted(
+    tmp_path, monkeypatch, env_name, finding_id
+):
+    config = _low_noise_config()
+    secret = f"canary-{env_name.lower()}"
+    monkeypatch.setenv(env_name, secret)
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = {finding.id: finding for finding in report.findings}
+
+    assert finding_id in findings
+    assert secret not in str(report.to_dict(show_paths=True))
+
+
+def test_custom_agent_manager_db_path_is_audited(tmp_path):
+    config = _low_noise_config()
+    custom = tmp_path / "state" / "custom-agents.sqlite"
+    custom.parent.mkdir()
+    custom.write_text("", encoding="utf-8")
+    config.agent_manager.db_path = str(custom)
+
+    report = build_data_boundary_report(config, tmp_path)
+    findings = {finding.id: finding for finding in report.findings}
+
+    assert findings["local-store-agents-db"].status == "warn"
+    assert findings["local-store-agents-db"].absolute_location == str(custom)
+
+
+def test_config_store_paths_resolve_against_jarvis_config():
+    from openjarvis.security.data_boundary_audit import _CONFIG_STORE_PATHS, _get
+
+    config = JarvisConfig()
+    missing = object()
+    for _finding_id, _title, dotted_path, _status in _CONFIG_STORE_PATHS:
+        assert _get(config, dotted_path, missing) is not missing, dotted_path
