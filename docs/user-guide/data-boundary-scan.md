@@ -43,6 +43,7 @@ OAuth token files.
 The current checks cover:
 
 - cloud-capable model provider, engine, and default model settings
+- server cloud-engine auto-activation from supported credential environment variables
 - local memory context injection combined with cloud-capable inference
 - traces, telemetry, learning, training, and spec-search settings
 - automatic memory service (`tools.storage.enabled` / `[memory].enabled`)
@@ -57,7 +58,7 @@ The current checks cover:
 - local stores such as `knowledge.db`, `credentials.toml`, `memory.db`, `traces.db`,
   `telemetry.db`, `scheduler.db`, embeddings, skill index, `.vault_key`, and memory files
 - connector credential files under `connectors/*.json`, without reading them
-- API-key and other runtime credential environment variables (presence only)
+- API-key and other runtime credential environment variables (presence only, including Deepgram and NIM)
 - a scope note for frontend credential storage when cloud/API-key surfaces exist
 
 Configured database paths (for example `traces.db_path` or `memory.db_path`)
@@ -66,7 +67,10 @@ OpenJarvis home directory.
 
 Static Deep Research targeting uses configuration only (no request overrides):
 `deep_research.engine` or `engine.default`, and `deep_research.model` or
-`server.model` or `intelligence.default_model`.
+`server.model` or `intelligence.default_model`. When no explicit
+`deep_research.engine` is set, server cloud auto-activation credentials are also
+reported as a potential cloud route because the web research path may reuse the
+active server engine.
 
 Model identifiers that contain vendor names (for example `deepseek-r1` or
 `openai/gpt-oss`) are not treated as cloud-bound when their effective engine is

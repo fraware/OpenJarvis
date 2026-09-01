@@ -31,8 +31,6 @@ def active_server_cloud_credentials(
     environment = os.environ if environ is None else environ
     return tuple(
         sorted(
-            name
-            for name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS
-            if environment.get(name)
+            name for name in SERVER_AUTO_CLOUD_ENGINE_ENV_VARS if environment.get(name)
         )
     )
