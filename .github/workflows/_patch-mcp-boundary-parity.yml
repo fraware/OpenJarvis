@@ -82,3 +82,5 @@ jobs:
           fi
           git commit -m "feat(security): align MCP transport boundary semantics"
           git push origin HEAD:feat/mcp-boundary-parity
+
+# Temporary workflow used only to apply and validate the assertion-guarded patch.
