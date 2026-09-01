@@ -1,0 +1,99 @@
+name: Scanner boundary review refine
+
+on:
+  push:
+    branches:
+      - work/scanner-inference-endpoint-boundaries-review
+
+permissions:
+  contents: write
+
+jobs:
+  refine:
+    if: ${{ !contains(github.event.head_commit.message, '[scanner-review-refined]') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - name: Apply reviewed refinements
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          audit = Path("src/openjarvis/security/data_boundary_audit.py")
+          text = audit.read_text(encoding="utf-8")
+
+          old_doc = '''The report builder intentionally limits itself to configuration values,\nenvironment-key presence, and file existence. It never reads private user\ncontent from connector credential files, memory files, trace databases, logs, or\nother local runtime stores.\n'''
+          new_doc = '''The report builder limits itself to configuration values, endpoint-host settings\nused only for redaction-safe boundary classification, credential-key presence,\nand file existence. It never reads private user content from connector credential\nfiles, memory files, trace databases, logs, or other local runtime stores.\n'''
+          assert text.count(old_doc) == 1
+          text = text.replace(old_doc, new_doc, 1)
+
+          old_comment = '''# Specialized findings carry provider/channel semantics; remaining keys get a\n# presence-only generic finding. Values are never read or printed.\n'''
+          new_comment = '''# Specialized findings carry provider/channel semantics; remaining keys get a\n# presence-only generic finding. Credential values are checked only for presence\n# and never emitted.\n'''
+          assert text.count(old_comment) == 1
+          text = text.replace(old_comment, new_comment, 1)
+
+          assert text.count("value was not read or printed") == 4
+          text = text.replace(
+              "value was not read or printed",
+              "value was not interpreted or printed",
+          )
+
+          old_key = '    engine_text = str(engine or "").strip().lower().replace("-", "_")\n'
+          new_key = '    engine_text = str(engine or "").strip().lower()\n'
+          assert text.count(old_key) == 1
+          text = text.replace(old_key, new_key, 1)
+          audit.write_text(text, encoding="utf-8")
+
+          tests = Path("tests/security/test_inference_endpoint_boundaries.py")
+          test_text = tests.read_text(encoding="utf-8")
+          assert "test_runtime_resolved_hyphenated_engine_keeps_runtime_source" not in test_text
+          test_text += '''\n\ndef test_runtime_resolved_hyphenated_engine_keeps_runtime_source(tmp_path) -> None:\n    config = _config()\n    config.engine.default = "vllm-pearl-mining"\n    config.agent.context_from_memory = True\n\n    report = build_data_boundary_report(config, tmp_path)\n    findings = _findings(report)\n\n    endpoint = findings["inference-endpoint-boundary-unknown-engine-default"]\n    assert endpoint.status == "warn"\n    assert "via runtime" in endpoint.evidence\n    assert findings["memory-context-to-unknown-inference-boundary"].status == "warn"\n'''
+          tests.write_text(test_text, encoding="utf-8")
+          PY
+      - name: Install dependencies
+        run: uv sync --extra dev --extra framework-comparison --extra server
+      - name: Format and lint
+        run: |
+          uv run ruff format \
+            src/openjarvis/security/data_boundary_audit.py \
+            tests/security/test_inference_endpoint_boundaries.py
+          uv run ruff check \
+            src/openjarvis/core/inference_boundaries.py \
+            src/openjarvis/security/data_boundary_audit.py \
+            tests/core/test_inference_boundaries.py \
+            tests/security/test_data_boundary_audit.py \
+            tests/security/test_inference_endpoint_boundaries.py \
+            tests/cli/test_scan_data_boundaries.py
+          uv run ruff format --check \
+            src/openjarvis/core/inference_boundaries.py \
+            src/openjarvis/security/data_boundary_audit.py \
+            tests/core/test_inference_boundaries.py \
+            tests/security/test_data_boundary_audit.py \
+            tests/security/test_inference_endpoint_boundaries.py \
+            tests/cli/test_scan_data_boundaries.py
+      - name: Targeted tests
+        run: |
+          uv run pytest -q -m "not live and not cloud and not hub" \
+            tests/core/test_inference_boundaries.py \
+            tests/security/test_data_boundary_audit.py \
+            tests/security/test_inference_endpoint_boundaries.py \
+            tests/cli/test_scan_data_boundaries.py
+      - name: Static checks
+        run: |
+          python -m py_compile \
+            src/openjarvis/core/inference_boundaries.py \
+            src/openjarvis/security/data_boundary_audit.py \
+            tests/security/test_inference_endpoint_boundaries.py
+          git diff --check
+      - name: Persist reviewed product files
+        run: |
+          git config user.name repository-maintenance
+          git config user.email repository-maintenance@users.noreply.github.com
+          git add \
+            src/openjarvis/security/data_boundary_audit.py \
+            tests/security/test_inference_endpoint_boundaries.py
+          git commit -m "refine(scan): preserve exact engine boundary keys [scanner-review-refined]"
+          git push
