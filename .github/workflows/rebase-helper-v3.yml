@@ -1,0 +1,83 @@
+name: Rebase helper v3
+
+on:
+  pull_request:
+    branches:
+      - ci/rebase-helper-base
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/pr2-refresh-base
+          fetch-depth: 0
+
+      - name: Rebuild current server-boundary commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "fraware"
+          git config user.email "113530345+fraware@users.noreply.github.com"
+
+          if ! git cherry-pick 078460ce87432c23eb1f764b1f7d51c54d3a750a; then
+            python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/security/test_data_boundary_audit.py")
+          lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+          out = []
+          i = 0
+          conflicts = 0
+          while i < len(lines):
+              if lines[i].startswith("<<<<<<< "):
+                  conflicts += 1
+                  i += 1
+                  ours = []
+                  while i < len(lines) and not lines[i].startswith("======="):
+                      ours.append(lines[i])
+                      i += 1
+                  if i >= len(lines):
+                      raise RuntimeError("unterminated conflict")
+                  i += 1
+                  theirs = []
+                  while i < len(lines) and not lines[i].startswith(">>>>>>> "):
+                      theirs.append(lines[i])
+                      i += 1
+                  if i >= len(lines):
+                      raise RuntimeError("unterminated conflict")
+                  i += 1
+                  out.extend(ours)
+                  if ours and theirs and ours[-1].strip() and theirs[0].strip():
+                      out.append("\n")
+                  out.extend(theirs)
+              else:
+                  out.append(lines[i])
+                  i += 1
+          if conflicts != 1:
+              raise RuntimeError(f"expected one append-only conflict, found {conflicts}")
+          text = "".join(out)
+          if any(marker in text for marker in ("<<<<<<<", "=======", ">>>>>>>")):
+              raise RuntimeError("conflict marker remains")
+          text = text.replace(
+              "                    )\n\ndef test_server_cloud_key_runtime_parity_regressions",
+              "                    )\n\n\ndef test_server_cloud_key_runtime_parity_regressions",
+          )
+          path.write_text(text, encoding="utf-8")
+          PY
+            git add tests/security/test_data_boundary_audit.py
+            test -z "$(git diff --name-only --diff-filter=U)"
+            git cherry-pick --continue
+          fi
+
+          git diff --check HEAD^
+          python -m py_compile \
+            src/openjarvis/core/cloud_activation.py \
+            src/openjarvis/security/data_boundary_audit.py \
+            tests/core/test_cloud_activation.py \
+            tests/security/test_data_boundary_audit.py
+          git push origin HEAD:refs/heads/fix/server-boundary-parity-current
