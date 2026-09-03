@@ -1,0 +1,87 @@
+name: Rebase helper v5
+
+on:
+  pull_request:
+    branches:
+      - ci/rebase-helper-base
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/security-surface-closure-current
+          fetch-depth: 0
+      - name: Build clean MCP boundary commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "fraware"
+          git config user.email "113530345+fraware@users.noreply.github.com"
+          if ! git merge --squash c2e3418eedfd7051c84aa5e86c56b29f3bb54ab7; then
+            python - <<'PY'
+          from pathlib import Path
+
+          for filename in (
+              "src/openjarvis/security/data_boundary_audit.py",
+              "tests/security/test_data_boundary_audit.py",
+          ):
+              path = Path(filename)
+              lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+              out = []
+              i = 0
+              conflicts = 0
+              while i < len(lines):
+                  if not lines[i].startswith("<<<<<<< "):
+                      out.append(lines[i])
+                      i += 1
+                      continue
+                  conflicts += 1
+                  i += 1
+                  ours = []
+                  while i < len(lines) and not lines[i].startswith("======="):
+                      ours.append(lines[i])
+                      i += 1
+                  if i >= len(lines):
+                      raise RuntimeError(f"unterminated conflict in {filename}")
+                  i += 1
+                  theirs = []
+                  while i < len(lines) and not lines[i].startswith(">>>>>>> "):
+                      theirs.append(lines[i])
+                      i += 1
+                  if i >= len(lines):
+                      raise RuntimeError(f"unterminated conflict in {filename}")
+                  i += 1
+                  if ours == theirs:
+                      chosen = ours
+                  elif not ours:
+                      chosen = theirs
+                  elif not theirs:
+                      chosen = ours
+                  else:
+                      raise RuntimeError(f"non-trivial conflict in {filename}")
+                  out.extend(chosen)
+              if conflicts == 0:
+                  raise RuntimeError(f"expected conflict in {filename}")
+              text = "".join(out)
+              if any(marker in text for marker in ("<<<<<<<", "=======", ">>>>>>>")):
+                  raise RuntimeError(f"conflict marker remains in {filename}")
+              path.write_text(text, encoding="utf-8")
+          PY
+            git add src/openjarvis/security/data_boundary_audit.py tests/security/test_data_boundary_audit.py
+            test -z "$(git diff --name-only --diff-filter=U)"
+          fi
+          git diff --check
+          python -m py_compile \
+            src/openjarvis/core/mcp_boundaries.py \
+            src/openjarvis/mcp/loader.py \
+            src/openjarvis/security/data_boundary_audit.py \
+            tests/core/test_mcp_boundaries.py \
+            tests/mcp/test_loader.py \
+            tests/security/test_data_boundary_audit.py
+          git commit -m "feat(security): align MCP transport boundaries"
+          git push origin HEAD:refs/heads/feat/mcp-boundary-parity-current
