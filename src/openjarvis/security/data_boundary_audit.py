@@ -23,6 +23,11 @@ from openjarvis.core.inference_boundaries import (
     EndpointBoundary,
     resolve_engine_boundary,
 )
+from openjarvis.core.mcp_boundaries import (
+    MCPConfigSource,
+    MCPTransportKind,
+    inspect_mcp_servers,
+)
 
 Status = Literal["fail", "warn", "info"]
 
@@ -1207,15 +1212,69 @@ def _audit_tool_surfaces(config: Any, builder: _FindingBuilder) -> None:
     mcp_enabled = bool(_get(config, "tools.mcp.enabled", False))
     mcp_servers = str(_get(config, "tools.mcp.servers", "") or "").strip()
     if mcp_enabled and mcp_servers:
+        inspection = inspect_mcp_servers(mcp_servers)
+        if inspection.source is MCPConfigSource.INLINE and not inspection.servers:
+            return
+        if inspection.source is MCPConfigSource.FILE_REFERENCE:
+            evidence = (
+                "tools.mcp.enabled = true; tools.mcp.servers is a file reference; "
+                "referenced file contents were not read"
+            )
+            potential_data_path = (
+                "agent tool calls/context -> unresolved configured MCP transports"
+            )
+        elif inspection.source is MCPConfigSource.INVALID_INLINE:
+            evidence = (
+                "tools.mcp.enabled = true; inline MCP server config is invalid; "
+                "raw config value was not emitted"
+            )
+            potential_data_path = (
+                "agent tool calls/context -> unresolved configured MCP transports"
+            )
+        else:
+            local_http = sum(
+                server.transport is MCPTransportKind.STREAMABLE_HTTP
+                and server.endpoint_boundary is EndpointBoundary.LOCAL_HOST
+                for server in inspection.servers
+            )
+            external_http = sum(
+                server.transport is MCPTransportKind.STREAMABLE_HTTP
+                and server.endpoint_boundary is EndpointBoundary.EXTERNAL_NETWORK
+                for server in inspection.servers
+            )
+            unknown_http = sum(
+                server.transport is MCPTransportKind.STREAMABLE_HTTP
+                and server.endpoint_boundary is EndpointBoundary.UNKNOWN
+                for server in inspection.servers
+            )
+            stdio = sum(
+                server.transport is MCPTransportKind.STDIO
+                for server in inspection.servers
+            )
+            invalid = sum(
+                server.transport is MCPTransportKind.INVALID
+                for server in inspection.servers
+            )
+            evidence = (
+                "tools.mcp.enabled = true; inline transport classes: "
+                f"external-http={external_http}, local-http={local_http}, "
+                f"unknown-http={unknown_http}, stdio={stdio}, invalid={invalid}; "
+                "endpoint, token, command, argument, and server-name values were "
+                "not emitted"
+            )
+            potential_data_path = (
+                "agent tool calls/context -> configured MCP HTTP/subprocess transports"
+            )
         builder.add(
             finding_id="mcp-servers-configured",
             status="warn",
-            title="External MCP servers are configured",
-            potential_data_path="agent tool calls/context -> configured MCP servers",
-            evidence="tools.mcp.enabled = true; tools.mcp.servers is non-empty",
+            title="MCP server transports are configured",
+            potential_data_path=potential_data_path,
+            evidence=evidence,
             recommendation=(
                 "Review MCP server trust, transport, and tool schemas before sending "
-                "sensitive prompts or tool arguments."
+                "sensitive prompts or tool arguments. Treat stdio as a subprocess "
+                "boundary and non-local HTTP as a network boundary."
             ),
         )
 

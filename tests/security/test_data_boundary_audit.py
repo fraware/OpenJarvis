@@ -807,6 +807,98 @@ def test_channel_send_produces_outbound_warn(tmp_path, tool_name):
     assert "telegram-secret-channel" not in str(payload)
 
 
+def test_empty_inline_mcp_server_list_has_no_surface_finding(tmp_path):
+    config = _low_noise_config()
+    config.tools.mcp.enabled = True
+    config.tools.mcp.servers = "[]"
+
+    report = build_data_boundary_report(config, tmp_path)
+
+    assert "mcp-servers-configured" not in {item.id for item in report.findings}
+
+
+def test_mcp_inline_transports_are_classified_without_values(tmp_path):
+    config = _low_noise_config()
+    config.tools.mcp.enabled = True
+    config.tools.mcp.servers = (
+        '[{"name":"remote-canary","url":"https://secret.example/mcp",'
+        '"token":"secret-token"},'
+        '{"name":"local-canary","url":"http://localhost:9583/mcp"},'
+        '{"name":"process-canary","command":"secret-command",'
+        '"args":["secret-arg"]},'
+        '{"name":"invalid-canary"}]'
+    )
+
+    report = build_data_boundary_report(config, tmp_path)
+    payload = str(report.to_dict(show_paths=True))
+    finding = {item.id: item for item in report.findings}["mcp-servers-configured"]
+
+    assert finding.status == "warn"
+    assert "external-http=1" in finding.evidence
+    assert "local-http=1" in finding.evidence
+    assert "stdio=1" in finding.evidence
+    assert "invalid=1" in finding.evidence
+    for secret in (
+        "secret.example",
+        "secret-token",
+        "secret-command",
+        "secret-arg",
+        "remote-canary",
+        "local-canary",
+        "process-canary",
+    ):
+        assert secret not in payload
+
+
+def test_mcp_url_precedence_is_reflected_in_scanner(tmp_path):
+    config = _low_noise_config()
+    config.tools.mcp.enabled = True
+    config.tools.mcp.servers = (
+        '[{"url":"http://localhost:9583/mcp","command":"must-not-run"}]'
+    )
+
+    report = build_data_boundary_report(config, tmp_path)
+    finding = {item.id: item for item in report.findings}["mcp-servers-configured"]
+
+    assert "local-http=1" in finding.evidence
+    assert "stdio=0" in finding.evidence
+    assert "must-not-run" not in str(report.to_dict(show_paths=True))
+
+
+def test_mcp_file_reference_is_not_opened_by_scanner(tmp_path):
+    config = _low_noise_config()
+    config.tools.mcp.enabled = True
+    referenced = tmp_path / "private-mcp-canary.json"
+    referenced.write_text(
+        '[{"url":"https://secret.example/mcp","token":"secret-token"}]',
+        encoding="utf-8",
+    )
+    config.tools.mcp.servers = str(referenced)
+
+    report = build_data_boundary_report(config, tmp_path)
+    payload = str(report.to_dict(show_paths=True))
+    finding = {item.id: item for item in report.findings}["mcp-servers-configured"]
+
+    assert "file reference" in finding.evidence
+    assert "were not read" in finding.evidence
+    assert "secret.example" not in payload
+    assert "secret-token" not in payload
+    assert "private-mcp-canary.json" not in payload
+
+
+def test_mcp_invalid_inline_config_is_reported_without_raw_value(tmp_path):
+    config = _low_noise_config()
+    config.tools.mcp.enabled = True
+    config.tools.mcp.servers = '[{"url":"https://secret.example", 1]'
+
+    report = build_data_boundary_report(config, tmp_path)
+    payload = str(report.to_dict(show_paths=True))
+    finding = {item.id: item for item in report.findings}["mcp-servers-configured"]
+
+    assert "inline MCP server config is invalid" in finding.evidence
+    assert "secret.example" not in payload
+
+
 def test_image_generate_produces_outbound_warn(tmp_path):
     config = _low_noise_config()
     config.tools.enabled = "image_generate"
