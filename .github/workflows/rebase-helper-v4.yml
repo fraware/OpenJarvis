@@ -1,0 +1,39 @@
+name: Rebase helper v4
+
+on:
+  pull_request:
+    branches:
+      - ci/rebase-helper-base
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/security-surface-closure-current
+          fetch-depth: 0
+      - name: Collect MCP merge inputs
+        shell: bash
+        run: |
+          set -u
+          git config user.name "rebase-helper"
+          git config user.email "rebase-helper@users.noreply.github.com"
+          git merge --squash c2e3418eedfd7051c84aa5e86c56b29f3bb54ab7 || true
+          mkdir -p merge-inputs-v4
+          git status --porcelain=v1 > merge-inputs-v4/status.txt
+          git diff --name-only --diff-filter=U > merge-inputs-v4/unmerged.txt
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            name=$(printf '%s' "$path" | tr '/' '_')
+            git show ":1:$path" > "merge-inputs-v4/${name}.base" 2>/dev/null || true
+            git show ":2:$path" > "merge-inputs-v4/${name}.ours" 2>/dev/null || true
+            git show ":3:$path" > "merge-inputs-v4/${name}.theirs" 2>/dev/null || true
+          done < merge-inputs-v4/unmerged.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rebase-merge-inputs-v4
+          path: merge-inputs-v4
