@@ -1,0 +1,37 @@
+name: Rebase helper v2
+
+on:
+  pull_request:
+    branches:
+      - ci/rebase-helper-base
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Collect merge inputs
+        shell: bash
+        run: |
+          set -u
+          git config user.name "rebase-helper"
+          git config user.email "rebase-helper@users.noreply.github.com"
+          git cherry-pick 078460ce87432c23eb1f764b1f7d51c54d3a750a || true
+          mkdir -p merge-inputs-v2
+          git status --porcelain=v1 > merge-inputs-v2/status.txt
+          cp src/openjarvis/security/data_boundary_audit.py merge-inputs-v2/data_boundary_audit.merged
+          for path in tests/security/test_data_boundary_audit.py; do
+            name=$(printf '%s' "$path" | tr '/' '_')
+            git show ":1:$path" > "merge-inputs-v2/${name}.base" 2>/dev/null || true
+            git show ":2:$path" > "merge-inputs-v2/${name}.ours" 2>/dev/null || true
+            git show ":3:$path" > "merge-inputs-v2/${name}.theirs" 2>/dev/null || true
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rebase-merge-inputs-v2
+          path: merge-inputs-v2
