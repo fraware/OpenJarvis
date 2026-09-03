@@ -1,0 +1,181 @@
+name: Final stack validation
+
+on:
+  push:
+    branches:
+      - ci/final-stack-matrix
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: pr1
+            sha: 8ca04e32c923bd1c074c3ffd20aad92fd3c2a2ba
+          - label: pr2
+            sha: ca582506a16d397c06625f30d05016a21cd28923
+          - label: pr3
+            sha: 6be69cc72dfb61392e10e473df9bfcfbc34afd91
+          - label: pr4
+            sha: 2eee124397cbf3d115940b26102e8593e05d8343
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev --extra framework-comparison --extra server
+      - run: uv run ruff check src/ tests/
+      - run: uv run ruff format --check src/ tests/
+
+  test:
+    name: linux (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: pr1
+            sha: 8ca04e32c923bd1c074c3ffd20aad92fd3c2a2ba
+          - label: pr2
+            sha: ca582506a16d397c06625f30d05016a21cd28923
+          - label: pr3
+            sha: 6be69cc72dfb61392e10e473df9bfcfbc34afd91
+          - label: pr4
+            sha: 2eee124397cbf3d115940b26102e8593e05d8343
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev --extra framework-comparison --extra server
+      - run: uv run maturin develop --manifest-path rust/crates/openjarvis-python/Cargo.toml
+      - name: Run tests
+        env:
+          COVERAGE_CORE: sysmon
+        run: |
+          uv run pytest tests/ -n auto -q --tb=short -m "not live and not cloud and not hub" \
+            --cov=openjarvis \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=60
+
+  windows:
+    name: windows ${{ matrix.python-version }} (${{ matrix.label }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: pr1
+            sha: 8ca04e32c923bd1c074c3ffd20aad92fd3c2a2ba
+            python-version: "3.12"
+          - label: pr1
+            sha: 8ca04e32c923bd1c074c3ffd20aad92fd3c2a2ba
+            python-version: "3.13"
+          - label: pr2
+            sha: ca582506a16d397c06625f30d05016a21cd28923
+            python-version: "3.12"
+          - label: pr2
+            sha: ca582506a16d397c06625f30d05016a21cd28923
+            python-version: "3.13"
+          - label: pr3
+            sha: 6be69cc72dfb61392e10e473df9bfcfbc34afd91
+            python-version: "3.12"
+          - label: pr3
+            sha: 6be69cc72dfb61392e10e473df9bfcfbc34afd91
+            python-version: "3.13"
+          - label: pr4
+            sha: 2eee124397cbf3d115940b26102e8593e05d8343
+            python-version: "3.12"
+          - label: pr4
+            sha: 2eee124397cbf3d115940b26102e8593e05d8343
+            python-version: "3.13"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev --extra server
+      - name: Verify Windows RAM detection
+        shell: bash
+        run: |
+          uv run python -c "from openjarvis.core.config import _total_ram_gb; ram = _total_ram_gb(); print(f'GlobalMemoryStatusEx RAM = {ram} GB'); assert ram > 0, f'Windows RAM detection returned {ram}, expected > 0'"
+      - name: Run Windows-specific tests
+        shell: bash
+        run: |
+          uv run pytest tests/hardware/test_hardware_profiles.py tests/cli/test_cli.py -v -m "not live and not cloud"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and import native extension
+        shell: bash
+        run: |
+          uv run maturin develop --manifest-path rust/crates/openjarvis-python/Cargo.toml
+          uv run python -c "import openjarvis_rust; print('native extension imports on Windows OK')"
+      - name: Smoke-test CLI
+        shell: bash
+        run: uv run jarvis --version
+
+  rust:
+    name: rust (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: pr1
+            sha: 8ca04e32c923bd1c074c3ffd20aad92fd3c2a2ba
+          - label: pr2
+            sha: ca582506a16d397c06625f30d05016a21cd28923
+          - label: pr3
+            sha: 6be69cc72dfb61392e10e473df9bfcfbc34afd91
+          - label: pr4
+            sha: 2eee124397cbf3d115940b26102e8593e05d8343
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
