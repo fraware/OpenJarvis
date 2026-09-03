@@ -1,9 +1,9 @@
 """Application data-boundary diagnostics for OpenJarvis.
 
-The report builder intentionally limits itself to configuration values,
-environment-key presence, and file existence. It never reads private user
-content from connector credential files, memory files, trace databases, logs, or
-other local runtime stores.
+The report builder limits itself to configuration values, endpoint-host settings
+used only for redaction-safe boundary classification, credential-key presence,
+and file existence. It never reads private user content from connector credential
+files, memory files, trace databases, logs, or other local runtime stores.
 """
 
 from __future__ import annotations
@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any, Iterable, Literal
 
 from openjarvis.core.credentials import TOOL_CREDENTIALS
+from openjarvis.core.inference_boundaries import (
+    EndpointBoundary,
+    resolve_engine_boundary,
+)
 
 Status = Literal["fail", "warn", "info"]
 
@@ -32,24 +36,6 @@ CLOUD_PROVIDER_KEYS = {
     "openrouter",
 }
 
-LOCAL_ENGINE_KEYS = {
-    # Apple Foundation Models, both the in-process engine and the shim. The
-    # Python SDK has no Private Cloud Compute path, so inference is
-    # unconditionally on-device.
-    "afm",
-    "apple_fm",
-    "exo",
-    "gemma_cpp",
-    "lemonade",
-    "llamacpp",
-    "lmstudio",
-    "mlx",
-    "nexa",
-    "ollama",
-    "sglang",
-    "uzu",
-    "vllm",
-}
 
 API_KEY_ENV_VARS = {
     "ANTHROPIC_API_KEY": ("Anthropic cloud inference", {"anthropic", "claude"}),
@@ -132,7 +118,8 @@ RUNTIME_CREDENTIAL_ENV_KEYS = {
 }
 
 # Specialized findings carry provider/channel semantics; remaining keys get a
-# presence-only generic finding. Values are never read or printed.
+# presence-only generic finding. Credential values are checked only for presence
+# and never emitted.
 _SPECIALIZED_CREDENTIAL_ENV_VARS = (
     set(API_KEY_ENV_VARS)
     | set(CHANNEL_SECRET_ENV_VARS)
@@ -426,6 +413,7 @@ def build_data_boundary_report(
         )
     elif config_loaded:
         _audit_outbound_settings(config, builder)
+        _audit_inference_endpoint_boundaries(config, builder)
         _audit_telemetry_settings(config, builder)
         _audit_memory_cloud_composition(config, builder)
         _audit_memory_service(config, builder)
@@ -485,6 +473,87 @@ def build_data_boundary_report(
     )
 
 
+def _audit_inference_endpoint_boundaries(
+    config: Any,
+    builder: _FindingBuilder,
+) -> None:
+    """Report explicit inference engines whose endpoint locality needs review."""
+
+    targets: list[tuple[str, Any, Any]] = [
+        (
+            "intelligence.provider",
+            _get(config, "intelligence.provider", ""),
+            _get(config, "intelligence.default_model", ""),
+        ),
+        (
+            "intelligence.preferred_engine",
+            _get(config, "intelligence.preferred_engine", ""),
+            _get(config, "intelligence.default_model", ""),
+        ),
+        (
+            "engine.default",
+            _get(config, "engine.default", ""),
+            _get(config, "intelligence.default_model", ""),
+        ),
+        (
+            "deep_research.engine",
+            _get(config, "deep_research.engine", ""),
+            _get(config, "deep_research.model", ""),
+        ),
+        (
+            "optimize.optimizer_provider",
+            _get(config, "optimize.optimizer_provider", ""),
+            _get(config, "optimize.judge_model", ""),
+        ),
+    ]
+    if bool(_get(config, "learning.spec_search.enabled", False)):
+        targets.append(
+            (
+                "learning.spec_search.teacher_engine",
+                _get(config, "learning.spec_search.teacher_engine", ""),
+                _get(config, "learning.spec_search.teacher_model", ""),
+            )
+        )
+
+    for dotted_path, engine, model in targets:
+        engine_text = str(engine or "").strip()
+        if not engine_text:
+            continue
+        boundary, source = _target_boundary(config, engine_text, model)
+        normalized = dotted_path.replace(".", "-").replace("_", "-")
+        if boundary is EndpointBoundary.EXTERNAL_NETWORK:
+            builder.add(
+                finding_id=f"inference-endpoint-external-{normalized}",
+                status="warn",
+                title="Inference engine endpoint leaves the local host",
+                potential_data_path=(
+                    "inference request context -> external network endpoint"
+                ),
+                evidence=(
+                    f"{dotted_path} resolves to {boundary.value} via {source}; "
+                    "configured endpoint value was not emitted"
+                ),
+                recommendation=(
+                    "Review the endpoint trust boundary before sending sensitive "
+                    "prompt, memory, tool, or research context to this engine."
+                ),
+            )
+        elif boundary is EndpointBoundary.UNKNOWN:
+            builder.add(
+                finding_id=f"inference-endpoint-boundary-unknown-{normalized}",
+                status="warn",
+                title="Inference engine endpoint boundary is unknown",
+                potential_data_path=(
+                    "inference request context -> unresolved endpoint boundary"
+                ),
+                evidence=f"{dotted_path} boundary is unknown via {source}",
+                recommendation=(
+                    "Classify the engine endpoint before relying on local-only data "
+                    "boundary assumptions."
+                ),
+            )
+
+
 def _audit_outbound_settings(config: Any, builder: _FindingBuilder) -> None:
     if bool(_get(config, "analytics.enabled", False)):
         builder.add(
@@ -500,7 +569,8 @@ def _audit_outbound_settings(config: Any, builder: _FindingBuilder) -> None:
         )
 
     provider = _get(config, "intelligence.provider", "")
-    if _is_cloud_value(provider):
+    provider_boundary, _ = _target_boundary(config, provider, "")
+    if provider_boundary is EndpointBoundary.VENDOR_CLOUD:
         builder.add(
             finding_id="cloud-provider-configured",
             status="warn",
@@ -521,18 +591,20 @@ def _audit_outbound_settings(config: Any, builder: _FindingBuilder) -> None:
         _get(config, "engine.default", ""),
         provider,
     )
-    if _target_is_cloud(effective_engine, default_model):
+    default_boundary, _ = _target_boundary(config, effective_engine, default_model)
+    if default_model and default_boundary is EndpointBoundary.VENDOR_CLOUD:
         builder.add(
             finding_id="cloud-default-model-configured",
             status="warn",
             title="Cloud default model configured",
             potential_data_path="model requests -> default cloud model",
             evidence=f"intelligence.default_model = {_quote(default_model)}",
-            recommendation=("Use a local default model for local-only operation."),
+            recommendation="Use a local default model for local-only operation.",
         )
 
     preferred_engine = _get(config, "intelligence.preferred_engine", "")
-    if _is_cloud_value(preferred_engine):
+    preferred_boundary, _ = _target_boundary(config, preferred_engine, "")
+    if preferred_boundary is EndpointBoundary.VENDOR_CLOUD:
         builder.add(
             finding_id="cloud-preferred-engine-configured",
             status="warn",
@@ -543,7 +615,8 @@ def _audit_outbound_settings(config: Any, builder: _FindingBuilder) -> None:
         )
 
     default_engine = _get(config, "engine.default", "")
-    if _is_cloud_value(default_engine):
+    engine_boundary, _ = _target_boundary(config, default_engine, "")
+    if engine_boundary is EndpointBoundary.VENDOR_CLOUD:
         builder.add(
             finding_id="cloud-default-engine-configured",
             status="warn",
@@ -554,7 +627,8 @@ def _audit_outbound_settings(config: Any, builder: _FindingBuilder) -> None:
         )
 
     optimize_provider = _get(config, "optimize.optimizer_provider", "")
-    if _is_cloud_value(optimize_provider):
+    optimize_boundary, _ = _target_boundary(config, optimize_provider, "")
+    if optimize_boundary is EndpointBoundary.VENDOR_CLOUD:
         builder.add(
             finding_id="cloud-optimizer-provider-configured",
             status="info",
@@ -568,7 +642,8 @@ def _audit_outbound_settings(config: Any, builder: _FindingBuilder) -> None:
         )
 
     judge_model = _get(config, "optimize.judge_model", "")
-    if _target_is_cloud(optimize_provider, judge_model):
+    judge_boundary, _ = _target_boundary(config, optimize_provider, judge_model)
+    if judge_model and judge_boundary is EndpointBoundary.VENDOR_CLOUD:
         builder.add(
             finding_id="cloud-judge-model-configured",
             status="info",
@@ -599,10 +674,16 @@ def _audit_telemetry_settings(config: Any, builder: _FindingBuilder) -> None:
 def _audit_memory_service(config: Any, builder: _FindingBuilder) -> None:
     if not bool(_get(config, "tools.storage.enabled", False)):
         return
-    has_cloud = bool(_primary_cloud_signals(config))
+    primary_boundaries = [
+        boundary for _, boundary in _primary_inference_signals(config)
+    ]
+    has_vendor_cloud = EndpointBoundary.VENDOR_CLOUD in primary_boundaries
+    has_external_endpoint = EndpointBoundary.EXTERNAL_NETWORK in primary_boundaries
     evidence = "tools.storage.enabled = true"
-    if has_cloud:
+    if has_vendor_cloud:
         evidence += "; cloud inference surface detected"
+    elif has_external_endpoint:
+        evidence += "; external inference endpoint detected"
     builder.add(
         finding_id="memory-service-enabled",
         status="warn",
@@ -621,9 +702,10 @@ def _audit_memory_service(config: Any, builder: _FindingBuilder) -> None:
 def _audit_deep_research_settings(config: Any, builder: _FindingBuilder) -> None:
     engine = _get(config, "deep_research.engine", "")
     model = _get(config, "deep_research.model", "")
-    cloud_engine = _is_cloud_value(engine)
     effective_engine, effective_model = _effective_deep_research_target(config)
-    cloud_model = bool(model) and _target_is_cloud(effective_engine, effective_model)
+    boundary, _ = _target_boundary(config, effective_engine, effective_model)
+    cloud_engine = bool(engine) and boundary is EndpointBoundary.VENDOR_CLOUD
+    cloud_model = bool(model) and boundary is EndpointBoundary.VENDOR_CLOUD
     if not cloud_engine and not cloud_model:
         return
     evidence_parts = []
@@ -693,15 +775,15 @@ def _audit_knowledge_cloud_composition(
     root: Path,
     builder: _FindingBuilder,
 ) -> None:
-    """Flag local knowledge chunks routed toward cloud Deep Research inference."""
+    """Flag local knowledge chunks routed toward outbound Deep Research inference."""
     tools = _configured_tools(config)
     scan_active = _scan_chunks_surface_active(config, tools)
     knowledge_exists = _knowledge_store_exists(root)
     engine, model = _effective_deep_research_target(config)
-    cloud_target = _target_is_cloud(engine, model)
+    boundary, source = _target_boundary(config, engine, model)
+    outbound = boundary.leaves_local_host is True
 
-    if knowledge_exists and cloud_target:
-        # Deep Research auto-installs ScanChunksTool when knowledge.db exists.
+    if knowledge_exists and outbound:
         evidence_parts = [
             "knowledge.db exists",
             (
@@ -712,6 +794,8 @@ def _audit_knowledge_cloud_composition(
                 "effective deep_research model = "
                 f"{_quote(model) if model else '<empty>'}"
             ),
+            f"endpoint boundary = {boundary.value} via {source}",
+            "configured endpoint value was not emitted",
         ]
         if tools & KNOWLEDGE_ENGINE_TOOLS:
             evidence_parts.append(
@@ -721,18 +805,28 @@ def _audit_knowledge_cloud_composition(
             evidence_parts.append(
                 "deep research auto-installs scan_chunks when knowledge.db exists"
             )
+        is_vendor = boundary is EndpointBoundary.VENDOR_CLOUD
         builder.add(
-            finding_id="knowledge-chunks-to-cloud-risk",
+            finding_id=(
+                "knowledge-chunks-to-cloud-risk"
+                if is_vendor
+                else "knowledge-chunks-to-external-inference-risk"
+            ),
             status="fail",
-            title="Local knowledge chunks may be sent to cloud inference",
+            title=(
+                "Local knowledge chunks may be sent to cloud inference"
+                if is_vendor
+                else "Local knowledge chunks may leave the local host for inference"
+            ),
             potential_data_path=(
                 "local knowledge.db chunks -> scan_chunks / Deep Research -> "
-                "cloud inference"
+                + ("cloud inference" if is_vendor else "external inference endpoint")
             ),
             evidence="; ".join(evidence_parts),
             recommendation=(
-                "Use a local Deep Research engine/model when knowledge.db contains "
-                "sensitive documents, or remove cloud defaults before scanning chunks."
+                "Use a local-host Deep Research engine/model when knowledge.db "
+                "contains sensitive documents, or review the outbound endpoint "
+                "before scanning chunks."
             ),
         )
     elif scan_active:
@@ -743,8 +837,8 @@ def _audit_knowledge_cloud_composition(
         else:
             agent_name = _get(config, "agent.default_agent", "")
             evidence = f"agent.default_agent = {_quote(agent_name)}"
-        # Local effective target is informational; unset/unknown stays warn.
-        status: Status = "info" if engine and not cloud_target else "warn"
+        evidence += f"; endpoint boundary = {boundary.value} via {source}"
+        status: Status = "info" if boundary.leaves_local_host is False else "warn"
         builder.add(
             finding_id="knowledge-engine-tool-configured",
             status=status,
@@ -826,23 +920,63 @@ def _audit_memory_cloud_composition(
     builder: _FindingBuilder,
 ) -> None:
     context_from_memory = bool(_get(config, "agent.context_from_memory", False))
-    active_cloud = _primary_cloud_signals(config)
+    active = _primary_inference_signals(config)
+    outbound = [
+        (label, boundary) for label, boundary in active if boundary.leaves_local_host
+    ]
+    unknown = [
+        label for label, boundary in active if boundary is EndpointBoundary.UNKNOWN
+    ]
 
-    if context_from_memory and active_cloud:
+    if context_from_memory and outbound:
+        has_vendor = any(
+            boundary is EndpointBoundary.VENDOR_CLOUD for _, boundary in outbound
+        )
+        labels = [f"{label} ({boundary.value})" for label, boundary in outbound]
         builder.add(
-            finding_id="memory-context-to-cloud-risk",
+            finding_id=(
+                "memory-context-to-cloud-risk"
+                if has_vendor
+                else "memory-context-to-external-inference-risk"
+            ),
             status="fail",
-            title="Local memory may be injected into cloud-bound prompts",
+            title=(
+                "Local memory may be injected into cloud-bound prompts"
+                if has_vendor
+                else "Local memory may leave the local host in inference prompts"
+            ),
             potential_data_path=(
-                "indexed local memory -> prompt context -> cloud inference provider"
+                "indexed local memory -> prompt context -> "
+                + (
+                    "cloud inference provider"
+                    if has_vendor
+                    else "external inference endpoint"
+                )
             ),
             evidence=(
-                "agent.context_from_memory = true; cloud setting(s) = "
-                + ", ".join(active_cloud)
+                "agent.context_from_memory = true; outbound inference setting(s) = "
+                + ", ".join(labels)
             ),
             recommendation=(
-                "Disable agent.context_from_memory before using cloud inference, "
-                "or use local engines when indexed memory contains sensitive data."
+                "Disable agent.context_from_memory before outbound inference, "
+                "or use local-host engines when indexed memory contains sensitive data."
+            ),
+        )
+    elif context_from_memory and unknown:
+        builder.add(
+            finding_id="memory-context-to-unknown-inference-boundary",
+            status="warn",
+            title="Memory context injection has an unresolved inference boundary",
+            potential_data_path=(
+                "indexed local memory -> prompt context -> unknown endpoint"
+            ),
+            evidence=(
+                "agent.context_from_memory = true; unresolved setting(s) = "
+                + ", ".join(unknown)
+            ),
+            recommendation=(
+                "Classify the inference endpoint before injecting sensitive "
+                "indexed memory."
             ),
         )
     elif context_from_memory:
@@ -854,7 +988,7 @@ def _audit_memory_cloud_composition(
             evidence="agent.context_from_memory = true",
             recommendation=(
                 "Keep indexed memory scoped to data that may safely appear in future "
-                "prompts, especially if cloud engines are enabled later."
+                "prompts, especially if outbound engines are enabled later."
             ),
         )
 
@@ -921,22 +1055,37 @@ def _audit_trace_and_learning_settings(
     spec_search_enabled = bool(_get(config, "learning.spec_search.enabled", False))
     teacher_engine = _get(config, "learning.spec_search.teacher_engine", "")
     teacher_model = _get(config, "learning.spec_search.teacher_model", "")
-    if spec_search_enabled and _is_cloud_value(teacher_engine):
+    teacher_boundary, teacher_source = _target_boundary(
+        config, teacher_engine, teacher_model
+    )
+    if spec_search_enabled and teacher_boundary.leaves_local_host:
+        is_vendor = teacher_boundary is EndpointBoundary.VENDOR_CLOUD
         builder.add(
-            finding_id="spec-search-cloud-teacher-enabled",
+            finding_id=(
+                "spec-search-cloud-teacher-enabled"
+                if is_vendor
+                else "spec-search-external-teacher-enabled"
+            ),
             status="fail",
-            title="LLM-guided spec search uses a cloud teacher engine",
+            title=(
+                "LLM-guided spec search uses a cloud teacher engine"
+                if is_vendor
+                else "LLM-guided spec search uses an external teacher endpoint"
+            ),
             potential_data_path=(
-                "diagnostics/spec-search context -> cloud teacher model"
+                "diagnostics/spec-search context -> "
+                + ("cloud teacher model" if is_vendor else "external teacher endpoint")
             ),
             evidence=(
                 "learning.spec_search.enabled = true; "
                 f"teacher_engine = {_quote(teacher_engine)}; "
-                f"teacher_model = {_quote(teacher_model)}"
+                f"teacher_model = {_quote(teacher_model)}; "
+                f"endpoint boundary = {teacher_boundary.value} via {teacher_source}; "
+                "configured endpoint value was not emitted"
             ),
             recommendation=(
-                "Use a local teacher engine/model or keep spec search disabled for "
-                "local-only operation."
+                "Use a local-host teacher engine/model or keep spec search disabled "
+                "for local-only operation."
             ),
         )
 
@@ -1218,7 +1367,7 @@ def _audit_environment_credentials(
             status=status,
             title=f"Cloud/API credential available in environment: {env_name}",
             potential_data_path=f"process environment -> {purpose}",
-            evidence=f"{env_name} is set; value was not read or printed",
+            evidence=f"{env_name} is set; value was not interpreted or printed",
             recommendation=(
                 "Unset this variable for local-only operation. The audit reports "
                 "only presence and never prints credential values."
@@ -1337,7 +1486,7 @@ def _audit_channel_environment_credentials(
             status=status,
             title=f"Channel secret available in environment: {env_name}",
             potential_data_path=f"process environment -> {purpose}",
-            evidence=f"{env_name} is set; value was not read or printed",
+            evidence=f"{env_name} is set; value was not interpreted or printed",
             recommendation=(
                 "Unset channel secrets when external messaging is not in use. "
                 "The audit reports only presence and never prints secret values."
@@ -1353,7 +1502,7 @@ def _audit_channel_environment_credentials(
             status=status,
             title=f"Channel endpoint or identifier in environment: {env_name}",
             potential_data_path=f"process environment -> {purpose}",
-            evidence=f"{env_name} is set; value was not read or printed",
+            evidence=f"{env_name} is set; value was not interpreted or printed",
             recommendation=(
                 "Unset channel endpoint variables when external messaging is not "
                 "in use. The audit reports only presence."
@@ -1427,7 +1576,7 @@ def _audit_generic_runtime_credentials(builder: _FindingBuilder) -> None:
             status="info",
             title=f"Runtime credential available in environment: {env_name}",
             potential_data_path=f"process environment -> {env_name}",
-            evidence=f"{env_name} is set; value was not read or printed",
+            evidence=f"{env_name} is set; value was not interpreted or printed",
             recommendation=(
                 "Unset unused runtime credentials. The audit reports only presence "
                 "and never prints credential values."
@@ -1510,20 +1659,27 @@ def _audit_speech_settings(config: Any, builder: _FindingBuilder) -> None:
 
 
 def _has_cloud_api_surface(config: Any | None, active_tools: set[str]) -> bool:
-    """True when cloud inference/API-key surfaces are configured (not browser-only)."""
+    """True when vendor-cloud inference/API-key surfaces are configured."""
     if any(os.environ.get(name) for name in API_KEY_ENV_VARS):
         return True
     if active_tools & CLOUD_API_SURFACES:
         return True
     if config is None:
         return False
-    if _primary_cloud_signals(config):
+    if any(
+        boundary is EndpointBoundary.VENDOR_CLOUD
+        for _, boundary in _primary_inference_signals(config)
+    ):
         return True
     deep_engine, deep_model = _effective_deep_research_target(config)
-    if _target_is_cloud(deep_engine, deep_model):
+    if _target_is_cloud(config, deep_engine, deep_model):
         return True
     optimizer_provider = _get(config, "optimize.optimizer_provider", "")
-    if _target_is_cloud(optimizer_provider, _get(config, "optimize.judge_model", "")):
+    if _target_is_cloud(
+        config,
+        optimizer_provider,
+        _get(config, "optimize.judge_model", ""),
+    ):
         return True
     if str(_get(config, "speech.backend", "") or "").lower() in {
         "openai",
@@ -1538,6 +1694,7 @@ def _has_cloud_api_surface(config: Any | None, active_tools: set[str]) -> bool:
         return True
     if bool(_get(config, "learning.spec_search.enabled", False)):
         return _target_is_cloud(
+            config,
             _get(config, "learning.spec_search.teacher_engine", ""),
             _get(config, "learning.spec_search.teacher_model", ""),
         )
@@ -1545,7 +1702,7 @@ def _has_cloud_api_surface(config: Any | None, active_tools: set[str]) -> bool:
 
 
 def _has_external_surface(config: Any | None, active_tools: set[str]) -> bool:
-    """True when external egress or cloud/API surfaces are present."""
+    """True when external egress or vendor-cloud/API surfaces are present."""
     if active_tools & EXTERNAL_TOOL_SURFACES:
         return True
     if (
@@ -1554,6 +1711,12 @@ def _has_external_surface(config: Any | None, active_tools: set[str]) -> bool:
         else False
     ):
         return True
+    if config is not None:
+        if any(
+            boundary.leaves_local_host is True
+            for boundary in _configured_inference_boundaries(config)
+        ):
+            return True
     return _has_cloud_api_surface(config, active_tools)
 
 
@@ -1568,14 +1731,24 @@ def _derive_verdict(findings: Iterable[DataBoundaryFinding]) -> str:
 
     if "memory-context-to-cloud-risk" in finding_ids:
         return "local memory may be sent to cloud inference"
+    if "memory-context-to-external-inference-risk" in finding_ids:
+        return "local memory may be sent to an external inference endpoint"
     if "knowledge-chunks-to-cloud-risk" in finding_ids:
         return "local knowledge may be sent to cloud inference"
+    if "knowledge-chunks-to-external-inference-risk" in finding_ids:
+        return "local knowledge may be sent to an external inference endpoint"
     if "config-root-error" in finding_ids:
         return "OpenJarvis home must be fixed before full data-boundary review"
     if "config-load-error" in finding_ids:
         return "configuration must be fixed before full data-boundary review"
     if "fail" in statuses:
         return "attention required for application data boundaries"
+    if any(fid.startswith("inference-endpoint-external-") for fid in finding_ids):
+        return "external inference endpoint data boundaries configured"
+    if any(
+        fid.startswith("inference-endpoint-boundary-unknown-") for fid in finding_ids
+    ):
+        return "inference endpoint boundary requires review"
     if any(
         fid in finding_ids
         for fid in {
@@ -1624,45 +1797,89 @@ def _get(obj: Any, dotted_path: str, default: Any = None) -> Any:
 
 
 def _is_cloud_value(value: Any) -> bool:
+    """Fallback classification for provider aliases without engine metadata."""
     if value is None:
         return False
     text = str(value).strip().lower()
-    if not text or text in LOCAL_ENGINE_KEYS:
+    if not text:
         return False
     return any(key in text for key in CLOUD_PROVIDER_KEYS)
 
 
-def _is_local_engine_value(value: Any) -> bool:
-    if value is None:
-        return False
-    text = str(value).strip().lower().replace("-", "_")
-    return text in LOCAL_ENGINE_KEYS
+def _target_boundary(
+    config: Any,
+    engine: Any,
+    model: Any,
+) -> tuple[EndpointBoundary, str]:
+    """Resolve an inference target without emitting configured endpoint values."""
+    engine_text = str(engine or "").strip().lower()
+    if engine_text:
+        resolution = resolve_engine_boundary(engine_text, config)
+        if resolution.boundary is not EndpointBoundary.UNKNOWN:
+            return resolution.boundary, resolution.source
+        if _is_cloud_value(engine_text):
+            return EndpointBoundary.VENDOR_CLOUD, "provider-alias"
+        if resolution.source == "runtime":
+            return EndpointBoundary.UNKNOWN, "runtime"
+    if _looks_like_cloud_model(model):
+        return EndpointBoundary.VENDOR_CLOUD, "model"
+    return EndpointBoundary.UNKNOWN, "unclassified"
 
 
-def _target_is_cloud(engine: Any, model: Any) -> bool:
-    """Classify a model target without treating local vendor model IDs as cloud."""
-    if _is_cloud_value(engine):
-        return True
-    if _is_local_engine_value(engine):
-        return False
-    return _looks_like_cloud_model(model)
+def _target_is_cloud(config: Any, engine: Any, model: Any) -> bool:
+    boundary, _ = _target_boundary(config, engine, model)
+    return boundary is EndpointBoundary.VENDOR_CLOUD
 
 
-def _primary_cloud_signals(config: Any) -> list[str]:
-    """Return explicit cloud signals for the primary inference target."""
+def _primary_inference_signals(
+    config: Any,
+) -> list[tuple[str, EndpointBoundary]]:
+    """Return redaction-safe boundary signals for primary inference settings."""
     provider = _get(config, "intelligence.provider", "")
     preferred_engine = _get(config, "intelligence.preferred_engine", "")
     default_engine = _get(config, "engine.default", "")
     default_model = _get(config, "intelligence.default_model", "")
-    signals = [
-        str(value)
-        for value in (provider, preferred_engine, default_engine)
-        if _is_cloud_value(value)
-    ]
+    signals: list[tuple[str, EndpointBoundary]] = []
+    for dotted_path, engine in (
+        ("intelligence.provider", provider),
+        ("intelligence.preferred_engine", preferred_engine),
+        ("engine.default", default_engine),
+    ):
+        if not str(engine or "").strip():
+            continue
+        boundary, _ = _target_boundary(config, engine, "")
+        signals.append((dotted_path, boundary))
+
     effective_engine = _first_nonempty(preferred_engine, default_engine, provider)
-    if not signals and _target_is_cloud(effective_engine, default_model):
-        signals.append(str(default_model))
+    if default_model:
+        boundary, _ = _target_boundary(config, effective_engine, default_model)
+        if boundary is not EndpointBoundary.UNKNOWN:
+            signals.append(("intelligence.default_model", boundary))
     return signals
+
+
+def _configured_inference_boundaries(config: Any) -> list[EndpointBoundary]:
+    boundaries = [boundary for _, boundary in _primary_inference_signals(config)]
+    deep_engine, deep_model = _effective_deep_research_target(config)
+    deep_boundary, _ = _target_boundary(config, deep_engine, deep_model)
+    boundaries.append(deep_boundary)
+
+    optimizer_provider = _get(config, "optimize.optimizer_provider", "")
+    optimizer_model = _get(config, "optimize.judge_model", "")
+    if optimizer_provider or optimizer_model:
+        optimizer_boundary, _ = _target_boundary(
+            config, optimizer_provider, optimizer_model
+        )
+        boundaries.append(optimizer_boundary)
+
+    if bool(_get(config, "learning.spec_search.enabled", False)):
+        teacher_boundary, _ = _target_boundary(
+            config,
+            _get(config, "learning.spec_search.teacher_engine", ""),
+            _get(config, "learning.spec_search.teacher_model", ""),
+        )
+        boundaries.append(teacher_boundary)
+    return boundaries
 
 
 def _looks_like_cloud_model(value: Any) -> bool:
